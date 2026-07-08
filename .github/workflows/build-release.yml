@@ -36,27 +36,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-build.txt
 
-      - name: Télécharger ffmpeg portable
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $ProgressPreference = "SilentlyContinue"
-          $dest = "tools"
-          New-Item -ItemType Directory -Path $dest -Force | Out-Null
-          $zip = Join-Path $dest "ffmpeg.zip"
-          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-          Write-Host "Téléchargement de ffmpeg…"
-          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-          Expand-Archive -Path $zip -DestinationPath $dest -Force
-          $src = Get-ChildItem -Path $dest -Directory -Filter "ffmpeg-master-*" | Select-Object -First 1
-          $target = Join-Path $dest "ffmpeg"
-          if (Test-Path $target) { Remove-Item $target -Recurse -Force }
-          Move-Item -Path $src.FullName -Destination $target
-          Remove-Item $zip -Force
-          if (-not (Test-Path (Join-Path $target "bin\ffmpeg.exe"))) {
-            throw "ffmpeg.exe introuvable après extraction"
-          }
-          Write-Host "ffmpeg prêt : $target\bin\ffmpeg.exe"
+      # Note : aucun ffmpeg externe n'est nécessaire — PyAV (dépendance de
+      # faster-whisper) embarque ses propres bibliothèques FFmpeg.
 
       - name: Compiler l'exécutable (PyInstaller)
         shell: pwsh

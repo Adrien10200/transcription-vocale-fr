@@ -39,7 +39,8 @@ A simple, modern desktop app powered by
 - 📋 **Copy / Save** the result in one click (`.txt` or `.srt` subtitles).
 - 🎨 **3 themes** — 🌙 Dark · ☀️ Light · 🎃 Halloween.
 - 🌍 **Bilingual UI** — switch between English and French with one click.
-- 🎬 **Many formats** — MP3, WAV, M4A, FLAC, OGG, MP4, MKV, MOV… (ffmpeg bundled).
+- 🎬 **Many formats** — MP3, WAV, M4A, FLAC, OGG, MP4, MKV, MOV… (audio decoding built in via PyAV, no external ffmpeg).
+- 🪶 **Lightweight** — ~270 MB app (down from 750 MB), plus the model cache.
 
 ---
 
@@ -98,15 +99,10 @@ cd transcription-vocale-fr
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
-# 3. Dependencies
+# 3. Dependencies (PyAV bundles FFmpeg — no external ffmpeg needed)
 pip install -r requirements.txt
 
-# 4. Portable ffmpeg -> tools/ffmpeg/bin/
-#    Download ffmpeg-master-latest-win64-gpl.zip from
-#    https://github.com/BtbN/FFmpeg-Builds/releases
-#    and extract so you get: tools/ffmpeg/bin/ffmpeg.exe
-
-# 5. Run
+# 4. Run
 python app.py
 ```
 
@@ -150,7 +146,7 @@ git push origin v1.0.0
 ├── assets/                # icon.svg / icon.ico / icon.png
 ├── requirements.txt       # Runtime dependencies
 ├── requirements-build.txt # Build dependencies
-├── tools/ffmpeg/          # Portable ffmpeg (not versioned)
+├── tools/                 # Optional local tooling (not versioned)
 ├── models/                # Model cache (~3 GB, not versioned)
 └── .github/workflows/     # CI: Windows build + release
 ```
@@ -218,7 +214,8 @@ Application de bureau simple et moderne, propulsée par
 - 📋 **Copier / Enregistrer** le résultat en un clic (`.txt` ou sous-titres `.srt`).
 - 🎨 **3 thèmes** — 🌙 Sombre · ☀️ Clair · 🎃 Halloween.
 - 🌍 **Interface bilingue** — basculez entre anglais et français en un clic.
-- 🎬 **Multi-formats** — MP3, WAV, M4A, FLAC, OGG, MP4, MKV, MOV… (ffmpeg inclus).
+- 🎬 **Multi-formats** — MP3, WAV, M4A, FLAC, OGG, MP4, MKV, MOV… (décodage intégré via PyAV, sans ffmpeg externe).
+- 🪶 **Léger** — application ~270 Mo (au lieu de 750 Mo), plus le cache du modèle.
 
 ### 🚀 Installation (utilisateur final)
 
@@ -249,7 +246,7 @@ cd transcription-vocale-fr
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-# ffmpeg portable -> tools/ffmpeg/bin/ (voir section anglaise)
+# Aucun ffmpeg externe requis : PyAV embarque les bibliothèques FFmpeg.
 python app.py
 ```
 
