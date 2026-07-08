@@ -23,13 +23,27 @@ Usage :
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 
 def emit(obj: dict) -> None:
-    """Écrit un événement JSON sur stdout et vide le tampon immédiatement."""
-    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    """Écrit un événement JSON sur stdout et vide le tampon immédiatement.
+    Robuste au cas (exe fenêtré) où sys.stdout serait None : on écrit alors
+    directement sur le descripteur de fichier 1."""
+    line = json.dumps(obj, ensure_ascii=False) + "\n"
+    out = sys.stdout
+    if out is not None:
+        try:
+            out.write(line)
+            out.flush()
+            return
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        os.write(1, line.encode("utf-8"))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def main() -> int:
