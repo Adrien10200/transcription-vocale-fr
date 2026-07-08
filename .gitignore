@@ -1,0 +1,33 @@
+# Environnements Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+
+# Artefacts de build
+build/
+dist/
+*.spec.bak
+
+# Modèles téléchargés (~3 Go) et outils lourds — jamais versionnés
+models/
+tools/
+
+# Fichiers de test / sortie locale
+_smoke_test.py
+_test/
+*.txt
+*.srt
+!requirements*.txt
+
+# Réglages IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# opencode (symlink local, spécifique à l'environnement)
+opencode.json

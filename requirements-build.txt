@@ -1,0 +1,4 @@
+# Dépendances supplémentaires pour compiler l'exécutable Windows.
+-r requirements.txt
+
+pyinstaller==6.21.0

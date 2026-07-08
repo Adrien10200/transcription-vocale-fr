@@ -1,0 +1,5 @@
+# Dépendances d'exécution de l'application.
+# Versions épinglées pour des builds reproductibles.
+
+faster-whisper==1.2.1
+PySide6==6.11.1
