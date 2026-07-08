@@ -28,20 +28,25 @@ import sys
 
 
 def emit(obj: dict) -> None:
-    """Écrit un événement JSON sur stdout et vide le tampon immédiatement.
-    Robuste au cas (exe fenêtré) où sys.stdout serait None : on écrit alors
-    directement sur le descripteur de fichier 1."""
-    line = json.dumps(obj, ensure_ascii=False) + "\n"
+    """Écrit un événement JSON sur stdout en UTF-8, et vide le tampon.
+
+    On écrit TOUJOURS des octets UTF-8 bruts (encodage explicite) pour éviter
+    que Windows n'encode en cp1252 et corrompe les accents. On privilégie le
+    tampon binaire (sys.stdout.buffer) ; à défaut, le descripteur de fichier 1.
+    """
+    data = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+
     out = sys.stdout
-    if out is not None:
+    buffer = getattr(out, "buffer", None) if out is not None else None
+    if buffer is not None:
         try:
-            out.write(line)
-            out.flush()
+            buffer.write(data)
+            buffer.flush()
             return
         except Exception:  # noqa: BLE001
             pass
     try:
-        os.write(1, line.encode("utf-8"))
+        os.write(1, data)
     except Exception:  # noqa: BLE001
         pass
 
