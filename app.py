@@ -16,11 +16,13 @@ L'application est pensée pour être simple d'utilisation par n'importe qui.
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QSettings
+from PySide6.QtCore import Qt, Signal, QProcess, QSettings
 from PySide6.QtGui import QGuiApplication, QIcon, QPixmap, QPainter, QColor, QPen
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -28,10 +30,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QComboBox, QSizePolicy,
 )
 
-from transcriber_core import (
-    Transcriber, TranscriptionOptions, TranscriptionResult, Segment,
-    TranscriptionCancelled, is_media_file, MEDIA_EXTS,
-)
+from transcriber_core import is_media_file, MEDIA_EXTS, APP_ROOT, RESOURCE_ROOT
 
 
 APP_NAME = "Transcription Vocale FR"
@@ -72,6 +71,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "failed_status": "Transcription failed.",
         "loading_model": "Loading model «{model}» (compute={compute}, threads={threads})…",
         "downloading_model": "First run: the model is downloading (~3 GB). This may take several minutes.",
+        "transcribing": "Transcribing…",
         "model_ready": "Model ready in {sec:.1f}s.",
         "lang_info": "Language: {lang} (prob. {prob:.2f}) — {dur:.1f}s",
         "done_status": "Done in {sec:.1f}s · {segs} segments · {dur:.1f}s of audio ({ratio:.2f}× real time).",
@@ -116,6 +116,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "failed_status": "Échec de la transcription.",
         "loading_model": "Chargement du modèle «{model}» (compute={compute}, threads={threads})…",
         "downloading_model": "Premier lancement : téléchargement du modèle (~3 Go). Cela peut prendre plusieurs minutes.",
+        "transcribing": "Transcription en cours…",
         "model_ready": "Modèle prêt en {sec:.1f}s.",
         "lang_info": "Langue : {lang} (prob. {prob:.2f}) — {dur:.1f}s",
         "done_status": "Terminé en {sec:.1f}s · {segs} segments · {dur:.1f}s d'audio ({ratio:.2f}× temps réel).",
@@ -281,63 +282,9 @@ QMessageBox QLabel {{ color: {t.text}; }}
 """
 
 
-# =========================================================================== #
-#  WORKER (thread de transcription)
-# =========================================================================== #
-class TranscriptionWorker(QObject):
-    """Exécute la transcription dans un thread. N'émet QUE des données pures
-    (str / dataclasses) — jamais de manipulation de widgets ici."""
-
-    # phase émet (clé_de_traduction, dict_de_parametres) => la GUI traduit.
-    phase = Signal(str, object)
-    segment = Signal(object)          # Segment
-    finished = Signal(object)         # TranscriptionResult
-    failed = Signal(str)
-    cancelled = Signal()
-    done = Signal()                   # toujours émis en dernier (nettoyage)
-
-    def __init__(self, transcriber: Transcriber, path: str,
-                 options: TranscriptionOptions) -> None:
-        super().__init__()
-        self._transcriber = transcriber
-        self._path = path
-        self._options = options
-        self._cancel = False
-
-    def cancel(self) -> None:
-        self._cancel = True
-
-    def _log_adapter(self, message: str) -> None:
-        """Ignore le texte brut du core ; les phases sont émises séparément."""
-        # Volontairement vide : l'affichage passe par les signaux `phase`
-        # pour rester traduisible. On garde l'adaptateur pour compat API.
-
-    def run(self) -> None:
-        try:
-            import os
-            threads = self._options.cpu_threads or (os.cpu_count() or 4)
-            self.phase.emit("loading_model", {
-                "model": self._options.model_name,
-                "compute": self._options.compute_type,
-                "threads": threads,
-            })
-            self.phase.emit("downloading_model", {})
-            self._transcriber.load(self._options, log=self._log_adapter)
-
-            result = self._transcriber.transcribe(
-                self._path,
-                self._options,
-                log=self._log_adapter,
-                on_segment=self.segment.emit,
-                cancel=lambda: self._cancel,
-            )
-            self.finished.emit(result)
-        except TranscriptionCancelled:
-            self.cancelled.emit()
-        except Exception as exc:  # noqa: BLE001
-            self.failed.emit(str(exc))
-        finally:
-            self.done.emit()
+# La transcription s'exécute dans un PROCESSUS séparé (QProcess), piloté
+# directement par MainWindow. Cela permet un vrai « Annuler » instantané
+# (kill du process), y compris pendant le téléchargement/chargement du modèle.
 
 
 # =========================================================================== #
@@ -419,11 +366,11 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(780, 640)
 
         self._settings = QSettings("Trustia", APP_NAME)
-        self._transcriber = Transcriber()
-        self._thread: QThread | None = None
-        self._worker: TranscriptionWorker | None = None
+        self._process: QProcess | None = None
+        self._cancelled_by_user = False
+        self._stdout_buffer = ""
         self._current_file: str | None = None
-        self._result: TranscriptionResult | None = None
+        self._result: dict | None = None
         self._live_parts: list[str] = []
         self._last_status_key: tuple[str, dict] | None = None
 
@@ -647,7 +594,7 @@ class MainWindow(QMainWindow):
 
     # ---- Sélection de fichier ---------------------------------------- #
     def _browse(self) -> None:
-        if self._worker is not None:
+        if self._process is not None:
             return
         patterns = " ".join(f"*{e}" for e in sorted(MEDIA_EXTS))
         path, _ = QFileDialog.getOpenFileName(
@@ -663,50 +610,48 @@ class MainWindow(QMainWindow):
         self.transcribe_btn.setEnabled(True)
         self._set_status("file_ready")
 
-    # ---- Transcription ------------------------------------------------ #
+    # ---- Transcription (processus séparé, annulable par kill) --------- #
+    def _worker_command(self) -> tuple[str, list[str]]:
+        """Retourne (programme, arguments) pour lancer le worker.
+        Fonctionne en mode script (python) comme en mode exe figé."""
+        model = self.quality_combo.currentData()
+        args_tail = [self._current_file, model, "fr", "int8", "8"]
+        if getattr(sys, "frozen", False):
+            # Dans l'exe : on relance l'exe lui-même avec un drapeau spécial.
+            return sys.executable, ["--run-worker", *args_tail]
+        worker_script = str(APP_ROOT / "transcribe_worker.py")
+        return sys.executable, [worker_script, *args_tail]
+
     def _start(self) -> None:
-        if not self._current_file or self._worker is not None:
+        if not self._current_file or self._process is not None:
             return
         self._result = None
         self._live_parts = []
+        self._stdout_buffer = ""
+        self._cancelled_by_user = False
         self.text_view.clear()
         self._set_busy(True)
         self._set_status("initializing")
 
-        options = TranscriptionOptions(
-            model_name=self.quality_combo.currentData(),
-            language="fr",
-            compute_type="int8",
-            beam_size=8,
-        )
-
-        thread = QThread(self)
-        worker = TranscriptionWorker(self._transcriber, self._current_file, options)
-        worker.moveToThread(thread)
-        self._thread = thread
-        self._worker = worker
-
-        # Résultats (slots exécutés dans le thread principal via QueuedConnection).
-        worker.phase.connect(self._on_phase)
-        worker.segment.connect(self._on_segment)
-        worker.finished.connect(self._on_finished)
-        worker.failed.connect(self._on_failed)
-        worker.cancelled.connect(self._on_cancelled)
-
-        # Cycle de vie du thread — pattern Qt canonique, sans wait() dans un slot.
-        thread.started.connect(worker.run)
-        worker.done.connect(thread.quit)          # arrête la boucle du thread
-        worker.done.connect(worker.deleteLater)   # planifie la destruction du worker
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._on_thread_finished)  # nettoyage UI (thread principal)
-
-        thread.start()
+        program, arguments = self._worker_command()
+        proc = QProcess(self)
+        proc.setProgram(program)
+        proc.setArguments(arguments)
+        proc.setWorkingDirectory(str(APP_ROOT))
+        proc.setProcessChannelMode(QProcess.SeparateChannels)
+        proc.readyReadStandardOutput.connect(self._on_proc_stdout)
+        proc.finished.connect(self._on_proc_finished)
+        proc.errorOccurred.connect(self._on_proc_error)
+        self._process = proc
+        proc.start()
 
     def _cancel(self) -> None:
-        if self._worker:
-            self._worker.cancel()
+        if self._process is not None:
+            self._cancelled_by_user = True
             self._set_status("cancelling")
             self.cancel_btn.setEnabled(False)
+            # Kill immédiat : interrompt téléchargement / chargement / transcription.
+            self._process.kill()
 
     def _copy(self) -> None:
         QGuiApplication.clipboard().setText(self.text_view.toPlainText())
@@ -723,8 +668,9 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            if path.lower().endswith(".srt") and self._result and self._result.srt:
-                Path(path).write_text(self._result.srt, encoding="utf-8")
+            srt = self._result.get("srt") if self._result else None
+            if path.lower().endswith(".srt") and srt:
+                Path(path).write_text(srt, encoding="utf-8")
             else:
                 Path(path).write_text(
                     self.text_view.toPlainText().strip() + "\n", encoding="utf-8"
@@ -734,41 +680,66 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, self.tr("error"),
                                  self.tr("save_error", err=str(exc)))
 
-    # ---- Réactions du worker (thread principal) ----------------------- #
-    def _on_phase(self, key: str, params: object) -> None:
-        params = params if isinstance(params, dict) else {}
-        self._set_status(key, **params)
+    # ---- Lecture des événements JSON du processus --------------------- #
+    def _on_proc_stdout(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode("utf-8", "replace")
+        self._stdout_buffer += data
+        while "\n" in self._stdout_buffer:
+            line, self._stdout_buffer = self._stdout_buffer.split("\n", 1)
+            line = line.strip()
+            if line:
+                self._handle_event(line)
 
-    def _on_segment(self, segment: Segment) -> None:
-        self._live_parts.append(segment.text)
-        self.text_view.setPlainText(" ".join(self._live_parts).strip())
-        sb = self.text_view.verticalScrollBar()
-        sb.setValue(sb.maximum())
+    def _handle_event(self, line: str) -> None:
+        try:
+            evt = json.loads(line)
+        except json.JSONDecodeError:
+            return  # ligne non-JSON (log parasite) : ignorée
+        etype = evt.get("type")
 
-    def _on_finished(self, result: TranscriptionResult) -> None:
-        self._result = result
-        self.text_view.setPlainText(result.text)
-        ratio = (result.duration / result.elapsed) if result.elapsed else 0.0
-        self._set_status("done_status", sec=result.elapsed,
-                         segs=len(result.segments), dur=result.duration, ratio=ratio)
-        self.copy_btn.setEnabled(bool(result.text))
-        self.save_btn.setEnabled(bool(result.text))
+        if etype == "phase":
+            params = evt.get("params") or {}
+            self._set_status(evt.get("key", ""), **params)
 
-    def _on_failed(self, message: str) -> None:
-        self._set_status("failed_status")
-        QMessageBox.critical(self, self.tr("error"),
-                             self.tr("transcribe_error", err=message))
+        elif etype == "segment":
+            self._live_parts.append(evt.get("text", ""))
+            self.text_view.setPlainText(" ".join(self._live_parts).strip())
+            sb = self.text_view.verticalScrollBar()
+            sb.setValue(sb.maximum())
 
-    def _on_cancelled(self) -> None:
-        self._set_status("cancelled")
+        elif etype == "finished":
+            self._result = evt
+            self.text_view.setPlainText(evt.get("text", ""))
+            elapsed = evt.get("elapsed", 0.0) or 0.0
+            duration = evt.get("duration", 0.0) or 0.0
+            ratio = (duration / elapsed) if elapsed else 0.0
+            self._set_status("done_status", sec=elapsed,
+                             segs=evt.get("segments", 0), dur=duration, ratio=ratio)
+            has_text = bool(evt.get("text"))
+            self.copy_btn.setEnabled(has_text)
+            self.save_btn.setEnabled(has_text)
 
-    def _on_thread_finished(self) -> None:
-        """Nettoyage UI une fois le thread réellement terminé.
-        S'exécute dans le thread principal (signal QThread.finished).
-        N'appelle jamais wait() ici : le thread s'est déjà arrêté seul."""
+        elif etype == "failed":
+            self._set_status("failed_status")
+            QMessageBox.critical(self, self.tr("error"),
+                                 self.tr("transcribe_error", err=evt.get("message", "")))
+
+    def _on_proc_error(self, _error) -> None:
+        # Une erreur de process (ex. « crashed ») après un kill volontaire est
+        # normale : elle sera traitée dans _on_proc_finished.
+        pass
+
+    def _on_proc_finished(self, _code: int, _status) -> None:
+        """Fin du processus : nettoie l'UI. Distingue annulation / fin normale."""
+        if self._cancelled_by_user:
+            self._set_status("cancelled")
         self._set_busy(False)
-        self._thread = None
-        self._worker = None
+        proc = self._process
+        self._process = None
+        if proc is not None:
+            proc.deleteLater()
 
     # ---- État occupé -------------------------------------------------- #
     def _set_busy(self, busy: bool) -> None:
@@ -785,11 +756,10 @@ class MainWindow(QMainWindow):
             self.save_btn.setEnabled(False)
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        if self._worker:
-            self._worker.cancel()
-        if self._thread and self._thread.isRunning():
-            self._thread.quit()
-            self._thread.wait(5000)
+        if self._process is not None:
+            self._cancelled_by_user = True
+            self._process.kill()
+            self._process.waitForFinished(3000)
         event.accept()
 
 
@@ -842,7 +812,20 @@ def app_icon() -> QIcon:
     return _ICON_CACHE
 
 
+def _run_worker_mode() -> int:
+    """Mode « worker » : utilisé quand l'exe figé se relance lui-même pour
+    exécuter la transcription dans un processus séparé (annulable par kill)."""
+    from transcribe_worker import main as worker_main
+    # Retire le drapeau pour retrouver les arguments attendus par le worker.
+    sys.argv = [sys.argv[0]] + sys.argv[2:]
+    return worker_main()
+
+
 def main() -> int:
+    # Point d'entrée « worker » (exe figé qui se relance pour transcrire).
+    if len(sys.argv) > 1 and sys.argv[1] == "--run-worker":
+        return _run_worker_mode()
+
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setWindowIcon(app_icon())

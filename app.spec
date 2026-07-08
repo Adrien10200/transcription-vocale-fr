@@ -49,6 +49,8 @@ hiddenimports = [
     "onnxruntime",
     "tokenizers",
     "av",
+    "transcribe_worker",   # worker relancé via --run-worker
+    "transcriber_core",
 ]
 
 a = Analysis(
