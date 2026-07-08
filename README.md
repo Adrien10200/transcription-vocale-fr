@@ -52,7 +52,9 @@ A simple, modern desktop app powered by
 4. Double-click **`Transcription Vocale FR.exe`**.
 
 > 💡 **First launch:** the `large-v3` model (~3 GB) is downloaded automatically and
-> cached locally. Subsequent launches are instant.
+> cached in `%LOCALAPPDATA%\TranscriptionVocaleFR\models`. Subsequent launches
+> are instant, and **upgrading the app never re-downloads the model** — the cache
+> lives outside the app folder.
 
 ---
 
@@ -225,7 +227,9 @@ Application de bureau simple et moderne, propulsée par
 4. Double-cliquez sur **`Transcription Vocale FR.exe`**.
 
 > 💡 **Premier lancement :** le modèle `large-v3` (~3 Go) est téléchargé
-> automatiquement puis mis en cache. Les fois suivantes sont immédiates.
+> automatiquement puis mis en cache dans `%LOCALAPPDATA%\TranscriptionVocaleFR\models`.
+> Les fois suivantes sont immédiates, et **mettre à jour l'application ne
+> re-télécharge jamais le modèle** — le cache est stocké hors du dossier de l'app.
 
 ### 🖥 Utilisation
 
