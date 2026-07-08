@@ -218,6 +218,7 @@ QComboBox {{
     border: 1px solid {t.border}; border-radius: 9px;
     padding: 8px 12px; min-width: 150px;
 }}
+QComboBox#themeCombo {{ min-width: 108px; }}
 QComboBox:hover {{ border-color: {t.border_focus}; }}
 QComboBox::drop-down {{ border: none; width: 26px; }}
 QComboBox::down-arrow {{ width: 0; height: 0; }}
@@ -476,20 +477,14 @@ class MainWindow(QMainWindow):
         head_col.addWidget(self.subtitle)
         top.addLayout(head_col, stretch=1)
 
-        # Bouton de bascule de langue
-        self.lang_btn = QPushButton("FR")
-        self.lang_btn.setObjectName("langButton")
-        self.lang_btn.setCursor(Qt.PointingHandCursor)
-        self.lang_btn.setFixedWidth(52)
-        self.lang_btn.clicked.connect(self._toggle_language)
-        top.addWidget(self.lang_btn, alignment=Qt.AlignTop)
-
+        # Colonne thème (label au-dessus, combo en dessous)
         theme_col = QVBoxLayout()
         theme_col.setSpacing(2)
         self.theme_lbl = QLabel("")
         self.theme_lbl.setObjectName("subtitle")
         self.theme_lbl.setAlignment(Qt.AlignRight)
         self.theme_combo = QComboBox()
+        self.theme_combo.setObjectName("themeCombo")
         for key in THEMES:
             self.theme_combo.addItem("", key)  # libellés remplis par _retranslate
         idx = self.theme_combo.findData(self._theme.key)
@@ -497,6 +492,22 @@ class MainWindow(QMainWindow):
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
         theme_col.addWidget(self.theme_lbl)
         theme_col.addWidget(self.theme_combo)
+
+        # Bouton de bascule de langue, aligné sur le combo de thème (même ligne)
+        self.lang_btn = QPushButton("FR")
+        self.lang_btn.setObjectName("langButton")
+        self.lang_btn.setCursor(Qt.PointingHandCursor)
+        self.lang_btn.setFixedWidth(46)
+        self.lang_btn.clicked.connect(self._toggle_language)
+
+        lang_col = QVBoxLayout()
+        lang_col.setSpacing(2)
+        lang_spacer = QLabel("")          # espace fantôme = hauteur du label thème
+        lang_spacer.setObjectName("subtitle")
+        lang_col.addWidget(lang_spacer)
+        lang_col.addWidget(self.lang_btn)
+
+        top.addLayout(lang_col)
         top.addLayout(theme_col)
         root.addLayout(top)
 
