@@ -9,7 +9,9 @@ possible en français sur CPU.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -127,6 +129,156 @@ os.environ["HF_HOME"] = str(MODEL_CACHE)
 os.environ["HUGGINGFACE_HUB_CACHE"] = str(MODEL_CACHE)
 
 
+def _model_is_cached(model_name: str) -> bool:
+    """Vrai si le modèle demandé est déjà présent (blob complet) dans le cache.
+
+    On vérifie non seulement le dossier du dépôt, mais aussi qu'un blob
+    volumineux (le poids `model.bin`, ~3 Go) existe réellement — pour ne pas
+    activer le mode hors-ligne sur un cache partiel/corrompu.
+    """
+    repo = f"models--Systran--faster-whisper-{model_name}"
+    repo_dir = MODEL_CACHE / repo
+    if not repo_dir.is_dir():
+        return False
+    snapshots = repo_dir / "snapshots"
+    if not snapshots.is_dir():
+        return False
+    # Un snapshot doit contenir un model.bin (lien ou fichier) résolvable.
+    for snap in snapshots.iterdir():
+        model_bin = snap / "model.bin"
+        try:
+            if model_bin.exists() and model_bin.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def enable_offline_if_cached(model_name: str) -> bool:
+    """Active le mode 100 % hors-ligne de HuggingFace SI le modèle est déjà
+    présent localement. Cela empêche tout appel réseau (donc tout
+    re-téléchargement) au chargement d'un modèle déjà en cache.
+
+    Retourne True si le mode hors-ligne a été activé.
+    """
+    if _model_is_cached(model_name):
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        return True
+    # Modèle absent : on retire un éventuel mode hors-ligne pour permettre
+    # le premier téléchargement.
+    os.environ.pop("HF_HUB_OFFLINE", None)
+    os.environ.pop("TRANSFORMERS_OFFLINE", None)
+    return False
+
+
+# --------------------------------------------------------------------------- #
+# Corrections de vocabulaire (dictionnaire personnalisé, persistant).
+#
+# L'utilisateur peut définir des remplacements du type « Volio » -> « Voelio ».
+# Après chaque transcription, ces remplacements sont appliqués au texte final.
+# Le fichier est stocké dans le dossier de données utilisateur (persistant,
+# survit aux redémarrages ET aux mises à jour de l'application).
+# --------------------------------------------------------------------------- #
+def _corrections_file() -> Path:
+    """Chemin du fichier de corrections. Réutilise un fichier présent à côté de
+    l'app (mode portable) sinon le dossier utilisateur persistant."""
+    app_local = APP_ROOT / "corrections.json"
+    if app_local.is_file():
+        return app_local
+    try:
+        base = _user_data_dir()
+        base.mkdir(parents=True, exist_ok=True)
+        return base / "corrections.json"
+    except OSError:
+        return app_local
+
+
+CORRECTIONS_FILE = _corrections_file()
+
+
+def load_corrections() -> list[dict]:
+    """Charge la liste des corrections : [{"from": "...", "to": "...",
+    "whole_word": bool, "case_sensitive": bool}, ...]. Retourne [] si absent."""
+    try:
+        raw = CORRECTIONS_FILE.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    result: list[dict] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        src = str(item.get("from", "")).strip()
+        dst = str(item.get("to", ""))
+        if not src:
+            continue
+        result.append({
+            "from": src,
+            "to": dst,
+            "whole_word": bool(item.get("whole_word", True)),
+            "case_sensitive": bool(item.get("case_sensitive", False)),
+        })
+    return result
+
+
+def save_corrections(corrections: list[dict]) -> None:
+    """Enregistre la liste des corrections (création du dossier si besoin)."""
+    clean: list[dict] = []
+    for item in corrections:
+        src = str(item.get("from", "")).strip()
+        if not src:
+            continue
+        clean.append({
+            "from": src,
+            "to": str(item.get("to", "")),
+            "whole_word": bool(item.get("whole_word", True)),
+            "case_sensitive": bool(item.get("case_sensitive", False)),
+        })
+    try:
+        CORRECTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CORRECTIONS_FILE.write_text(
+            json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def apply_corrections(text: str, corrections: list[dict] | None = None) -> str:
+    """Applique les corrections de vocabulaire à un texte.
+
+    Chaque correction remplace « from » par « to ». Par défaut :
+      • whole_word=True  : ne remplace que des mots entiers (ex. « Volio » mais
+        pas « Voliotech »).
+      • case_sensitive=False : insensible à la casse.
+    Si « to » commence par une majuscule et « from » aussi, la casse d'origine
+    est raisonnablement préservée pour le premier caractère.
+    """
+    if corrections is None:
+        corrections = load_corrections()
+    if not corrections or not text:
+        return text
+
+    for corr in corrections:
+        src = corr.get("from", "")
+        dst = corr.get("to", "")
+        if not src:
+            continue
+        flags = 0 if corr.get("case_sensitive", False) else re.IGNORECASE
+        pattern = re.escape(src)
+        if corr.get("whole_word", True):
+            # \b ne fonctionne pas toujours avec les caractères accentués :
+            # on encadre par des frontières basées sur les caractères de mot.
+            pattern = r"(?<![\w'’])" + pattern + r"(?![\w'’])"
+        try:
+            text = re.sub(pattern, lambda _m: dst, text, flags=flags)
+        except re.error:
+            continue
+    return text
+
+
 MEDIA_EXTS = {
     ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma",
     ".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".3gp", ".amr",
@@ -202,11 +354,16 @@ class Transcriber:
         if self._model is not None and key == self._loaded_key:
             return
 
+        # Si le modèle est déjà en cache : mode hors-ligne => AUCUN appel réseau,
+        # donc aucun risque de re-téléchargement. Sinon : téléchargement autorisé.
+        cached = enable_offline_if_cached(options.model_name)
+
         if log:
             log(f"Chargement du modèle « {options.model_name} » "
                 f"(compute={options.compute_type}, threads={threads})…")
-            log("Au premier lancement, le modèle est téléchargé (~3 Go). "
-                "Cela peut prendre plusieurs minutes.")
+            if not cached:
+                log("Premier lancement : le modèle est téléchargé (~3 Go). "
+                    "Cela peut prendre plusieurs minutes.")
 
         t0 = time.time()
         self._model = WhisperModel(
@@ -215,6 +372,7 @@ class Transcriber:
             compute_type=options.compute_type,
             cpu_threads=threads,
             download_root=str(MODEL_CACHE),
+            local_files_only=cached,
         )
         self._loaded_key = key
         if log:
@@ -260,6 +418,9 @@ class Transcriber:
             log(f"Langue : {info.language} (prob. {info.language_probability:.2f}) "
                 f"— durée {info.duration:.1f}s")
 
+        # Corrections de vocabulaire personnalisées (chargées une seule fois).
+        corrections = load_corrections()
+
         segments: list[Segment] = []
         srt_chunks: list[str] = []
 
@@ -267,6 +428,8 @@ class Transcriber:
             if cancel and cancel():
                 raise TranscriptionCancelled()
             clean = seg.text.strip()
+            if corrections:
+                clean = apply_corrections(clean, corrections)
             s = Segment(index=i, start=seg.start, end=seg.end, text=clean)
             segments.append(s)
             if on_segment:

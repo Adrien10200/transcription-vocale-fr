@@ -27,10 +27,14 @@ from PySide6.QtGui import QGuiApplication, QIcon, QPixmap, QPainter, QColor, QPe
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QPlainTextEdit, QFileDialog, QFrame, QProgressBar,
-    QMessageBox, QComboBox, QSizePolicy,
+    QMessageBox, QComboBox, QSizePolicy, QDialog, QTableWidget,
+    QTableWidgetItem, QHeaderView, QAbstractItemView,
 )
 
-from transcriber_core import is_media_file, MEDIA_EXTS, APP_ROOT, RESOURCE_ROOT
+from transcriber_core import (
+    is_media_file, MEDIA_EXTS, APP_ROOT, RESOURCE_ROOT,
+    load_corrections, save_corrections,
+)
 
 
 APP_NAME = "Transcription Vocale FR"
@@ -84,6 +88,21 @@ STRINGS: dict[str, dict[str, str]] = {
         "error": "Error",
         "save_error": "Failed to save:\n{err}",
         "transcribe_error": "Transcription failed:\n\n{err}",
+        "corrections": "Corrections",
+        "corrections_tip": "Custom word replacements (e.g. “Volio” → “Voelio”).",
+        "corr_title": "Vocabulary corrections",
+        "corr_intro": "When the app mishears a word, add a correction here. "
+                      "It is applied automatically to every transcription.",
+        "corr_col_heard": "Heard (wrong)",
+        "corr_col_fixed": "Replace with",
+        "corr_add": "Add",
+        "corr_remove": "Remove",
+        "corr_save": "Save",
+        "corr_close": "Close",
+        "corr_saved": "Corrections saved.",
+        "corr_placeholder_from": "e.g. Volio",
+        "corr_placeholder_to": "e.g. Voelio",
+        "corr_count": "{n} correction(s)",
     },
     "fr": {
         "app_title": "Transcription Vocale FR",
@@ -129,6 +148,21 @@ STRINGS: dict[str, dict[str, str]] = {
         "error": "Erreur",
         "save_error": "Échec de l'enregistrement :\n{err}",
         "transcribe_error": "La transcription a échoué :\n\n{err}",
+        "corrections": "Corrections",
+        "corrections_tip": "Remplacements de mots personnalisés (ex. « Volio » → « Voelio »).",
+        "corr_title": "Corrections de vocabulaire",
+        "corr_intro": "Quand l'application comprend mal un mot, ajoutez une correction ici. "
+                      "Elle est appliquée automatiquement à chaque transcription.",
+        "corr_col_heard": "Compris (erroné)",
+        "corr_col_fixed": "Remplacer par",
+        "corr_add": "Ajouter",
+        "corr_remove": "Supprimer",
+        "corr_save": "Enregistrer",
+        "corr_close": "Fermer",
+        "corr_saved": "Corrections enregistrées.",
+        "corr_placeholder_from": "ex. Volio",
+        "corr_placeholder_to": "ex. Voelio",
+        "corr_count": "{n} correction(s)",
     },
 }
 
@@ -279,6 +313,35 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none
 
 QMessageBox {{ background-color: {t.bg}; }}
 QMessageBox QLabel {{ color: {t.text}; }}
+
+QPushButton#corrButton {{
+    background-color: {t.surface}; color: {t.text_dim};
+    border: 1px solid {t.border}; border-radius: 9px;
+    padding: 8px 14px; font-size: 13px; font-weight: 600;
+}}
+QPushButton#corrButton:hover {{ border-color: {t.border_focus}; color: {t.text}; }}
+QPushButton#corrButton:disabled {{ color: {t.text_faint}; background-color: {t.surface_alt}; }}
+
+QDialog {{ background-color: {t.bg}; }}
+
+QTableWidget#corrTable {{
+    background-color: {t.surface_alt}; color: {t.text};
+    border: 1px solid {t.border}; border-radius: 10px;
+    gridline-color: {t.border};
+    selection-background-color: {t.accent};
+    selection-color: {t.accent_text};
+}}
+QTableWidget#corrTable::item {{ padding: 6px 8px; }}
+QHeaderView::section {{
+    background-color: {t.surface}; color: {t.text_dim};
+    padding: 8px; border: none; border-bottom: 1px solid {t.border};
+    font-weight: 600;
+}}
+QTableWidget QLineEdit {{
+    background-color: {t.surface}; color: {t.text};
+    border: 1px solid {t.border_focus}; border-radius: 4px;
+    selection-background-color: {t.accent};
+}}
 """
 
 
@@ -354,6 +417,138 @@ class DropZone(QFrame):
         self.setProperty("hover", on)
         self.style().unpolish(self)
         self.style().polish(self)
+
+
+# =========================================================================== #
+#  FENÊTRE DES CORRECTIONS DE VOCABULAIRE
+# =========================================================================== #
+class CorrectionsDialog(QDialog):
+    """Éditeur des corrections « mot entendu » -> « mot corrigé »,
+    sauvegardées de façon persistante (survivent aux mises à jour)."""
+
+    def __init__(self, parent, tr, qss: str) -> None:
+        super().__init__(parent)
+        self._tr = tr
+        self.setModal(True)
+        self.setMinimumSize(560, 460)
+        self.setStyleSheet(qss)
+        self.setWindowTitle(tr("corr_title"))
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 20, 22, 18)
+        root.setSpacing(14)
+
+        title = QLabel(tr("corr_title"))
+        title.setObjectName("header")
+        root.addWidget(title)
+
+        intro = QLabel(tr("corr_intro"))
+        intro.setObjectName("subtitle")
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        # Tableau : colonne 0 = entendu, colonne 1 = remplacement
+        self.table = QTableWidget(0, 2)
+        self.table.setObjectName("corrTable")
+        self.table.setHorizontalHeaderLabels([tr("corr_col_heard"), tr("corr_col_fixed")])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(
+            QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked
+            | QAbstractItemView.EditKeyPressed
+        )
+        root.addWidget(self.table, stretch=1)
+
+        # Boutons ligne : ajouter / supprimer
+        row_btns = QHBoxLayout()
+        row_btns.setSpacing(8)
+        self.add_btn = QPushButton(tr("corr_add"))
+        self.add_btn.setCursor(Qt.PointingHandCursor)
+        self.add_btn.clicked.connect(self._add_row)
+        self.remove_btn = QPushButton(tr("corr_remove"))
+        self.remove_btn.setObjectName("danger")
+        self.remove_btn.setCursor(Qt.PointingHandCursor)
+        self.remove_btn.clicked.connect(self._remove_row)
+        row_btns.addWidget(self.add_btn)
+        row_btns.addWidget(self.remove_btn)
+        row_btns.addStretch(1)
+        self.count_lbl = QLabel("")
+        self.count_lbl.setObjectName("status")
+        row_btns.addWidget(self.count_lbl)
+        root.addLayout(row_btns)
+
+        # Boutons bas : enregistrer / fermer
+        bottom = QHBoxLayout()
+        bottom.setSpacing(10)
+        bottom.addStretch(1)
+        self.close_btn = QPushButton(tr("corr_close"))
+        self.close_btn.setCursor(Qt.PointingHandCursor)
+        self.close_btn.clicked.connect(self.reject)
+        self.save_btn = QPushButton(tr("corr_save"))
+        self.save_btn.setObjectName("primary")
+        self.save_btn.setCursor(Qt.PointingHandCursor)
+        self.save_btn.clicked.connect(self._save_and_close)
+        bottom.addWidget(self.close_btn)
+        bottom.addWidget(self.save_btn)
+        root.addLayout(bottom)
+
+        self._load_into_table()
+        self.table.itemChanged.connect(lambda *_: self._update_count())
+        self._update_count()
+
+    # ---- Données ------------------------------------------------------ #
+    def _load_into_table(self) -> None:
+        corrections = load_corrections()
+        self.table.setRowCount(0)
+        for corr in corrections:
+            self._append_row(corr.get("from", ""), corr.get("to", ""))
+
+    def _append_row(self, src: str, dst: str) -> None:
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        self.table.setItem(r, 0, QTableWidgetItem(src))
+        self.table.setItem(r, 1, QTableWidgetItem(dst))
+
+    def _add_row(self) -> None:
+        self._append_row("", "")
+        r = self.table.rowCount() - 1
+        self.table.setCurrentCell(r, 0)
+        self.table.editItem(self.table.item(r, 0))
+        self._update_count()
+
+    def _remove_row(self) -> None:
+        r = self.table.currentRow()
+        if r >= 0:
+            self.table.removeRow(r)
+            self._update_count()
+
+    def _update_count(self) -> None:
+        n = 0
+        for r in range(self.table.rowCount()):
+            item = self.table.item(r, 0)
+            if item and item.text().strip():
+                n += 1
+        self.count_lbl.setText(self._tr("corr_count", n=n))
+
+    def _collect(self) -> list[dict]:
+        out: list[dict] = []
+        for r in range(self.table.rowCount()):
+            src_item = self.table.item(r, 0)
+            dst_item = self.table.item(r, 1)
+            src = src_item.text().strip() if src_item else ""
+            dst = dst_item.text() if dst_item else ""
+            if src:
+                out.append({
+                    "from": src, "to": dst,
+                    "whole_word": True, "case_sensitive": False,
+                })
+        return out
+
+    def _save_and_close(self) -> None:
+        save_corrections(self._collect())
+        self.accept()
 
 
 # =========================================================================== #
@@ -472,6 +667,12 @@ class MainWindow(QMainWindow):
         self.file_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         file_row.addWidget(self.file_label, stretch=1)
 
+        self.corrections_btn = QPushButton("")
+        self.corrections_btn.setObjectName("corrButton")
+        self.corrections_btn.setCursor(Qt.PointingHandCursor)
+        self.corrections_btn.clicked.connect(self._open_corrections)
+        file_row.addWidget(self.corrections_btn)
+
         self.quality_combo = QComboBox()
         self.quality_combo.addItem("", "large-v3")   # libellés via _retranslate
         self.quality_combo.addItem("", "medium")
@@ -564,6 +765,8 @@ class MainWindow(QMainWindow):
         self.quality_combo.setItemText(0, self.tr("quality_max"))
         self.quality_combo.setItemText(1, self.tr("quality_fast"))
         self.quality_combo.setToolTip(self.tr("quality_tip"))
+        self.corrections_btn.setText(self.tr("corrections"))
+        self.corrections_btn.setToolTip(self.tr("corrections_tip"))
 
         # Boutons
         self.transcribe_btn.setText(self.tr("transcribe"))
@@ -609,6 +812,11 @@ class MainWindow(QMainWindow):
         self.file_label.setText(Path(path).name)
         self.transcribe_btn.setEnabled(True)
         self._set_status("file_ready")
+
+    def _open_corrections(self) -> None:
+        dialog = CorrectionsDialog(self, self.tr, build_qss(self._theme))
+        if dialog.exec() == QDialog.Accepted:
+            self._set_status("corr_saved")
 
     # ---- Transcription (processus séparé, annulable par kill) --------- #
     def _worker_command(self) -> tuple[str, list[str]]:
@@ -750,6 +958,7 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setEnabled(busy)
         self.drop.set_enabled_visual(not busy)
         self.quality_combo.setEnabled(not busy)
+        self.corrections_btn.setEnabled(not busy)
         self.theme_combo.setEnabled(True)  # thème toujours changeable
         if busy:
             self.copy_btn.setEnabled(False)
