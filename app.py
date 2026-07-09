@@ -22,7 +22,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QProcess, QSettings, QThread, QObject
+from PySide6.QtCore import Qt, Signal, QProcess, QSettings, QThread, QObject, QTimer
 from PySide6.QtGui import (
     QGuiApplication, QIcon, QPixmap, QPainter, QColor, QPen, QDesktopServices,
 )
@@ -121,6 +121,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "update_uptodate": "You have the latest version ({cur}).",
         "update_error_title": "Update check failed",
         "update_error": "Could not check for updates:\n{err}",
+        "update_dl_title": "Updating",
+        "update_dl_heading": "Updating to {ver}",
+        "update_dl_starting": "Preparing download…",
+        "update_dl_progress": "Downloading… {got} / {tot} MB",
+        "update_dl_installing": "Installing… the app will restart automatically.",
+        "update_dl_failed": "Update failed.",
     },
     "fr": {
         "app_title": "Transcription Vocale FR",
@@ -195,6 +201,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "update_uptodate": "Vous avez la dernière version ({cur}).",
         "update_error_title": "Échec de la vérification",
         "update_error": "Impossible de vérifier les mises à jour :\n{err}",
+        "update_dl_title": "Mise à jour",
+        "update_dl_heading": "Mise à jour vers {ver}",
+        "update_dl_starting": "Préparation du téléchargement…",
+        "update_dl_progress": "Téléchargement… {got} / {tot} Mo",
+        "update_dl_installing": "Installation… l'application va redémarrer automatiquement.",
+        "update_dl_failed": "Échec de la mise à jour.",
     },
 }
 
@@ -323,6 +335,12 @@ QPushButton#langButton {{
 QPushButton#langButton:hover {{ border-color: {t.border_focus}; color: {t.border_focus}; }}
 
 QLabel#versionLabel {{ color: {t.text_faint}; font-size: 12px; }}
+
+QLabel#updIcon {{ font-size: 40px; color: {t.border_focus}; }}
+QLabel#updTitle {{ font-size: 17px; font-weight: 700; color: {t.text}; }}
+QLabel#updStatus {{ font-size: 13px; color: {t.text_dim}; }}
+QProgressBar#updBar {{ background-color: {t.surface_alt}; border: none; border-radius: 4px; }}
+QProgressBar#updBar::chunk {{ background-color: {t.accent}; border-radius: 4px; }}
 QPushButton#updateButton {{
     background-color: transparent; color: {t.border_focus};
     border: none; padding: 0; font-size: 12px; font-weight: 600;
@@ -623,9 +641,14 @@ def _parse_version(v: str) -> tuple:
 
 
 class UpdateChecker(QObject):
-    """Interroge l'API GitHub Releases dans un thread séparé (non bloquant)."""
+    """Interroge l'API GitHub Releases dans un thread séparé (non bloquant).
 
-    result = Signal(str)   # tag de la dernière version (ex. "v1.4.0")
+    Émet le tag de version ET l'URL de l'installeur (.exe) trouvé dans les
+    assets de la release, pour permettre une mise à jour automatique.
+    """
+
+    # (tag, installer_url)
+    result = Signal(str, str)
     failed = Signal(str)
     done = Signal()
 
@@ -642,11 +665,182 @@ class UpdateChecker(QObject):
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             tag = str(data.get("tag_name", "")).strip()
-            self.result.emit(tag)
+
+            # Cherche l'asset installeur (…Setup….exe) parmi les fichiers.
+            installer_url = ""
+            for asset in data.get("assets", []):
+                name = str(asset.get("name", "")).lower()
+                if name.endswith(".exe") and "setup" in name:
+                    installer_url = str(asset.get("browser_download_url", ""))
+                    break
+            self.result.emit(tag, installer_url)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
         finally:
             self.done.emit()
+
+
+class UpdateDownloader(QObject):
+    """Télécharge l'installeur avec progression, dans un thread séparé."""
+
+    progress = Signal(int, int)   # octets reçus, total
+    finished = Signal(str)        # chemin du fichier téléchargé
+    failed = Signal(str)
+    done = Signal()
+
+    def __init__(self, url: str) -> None:
+        super().__init__()
+        self._url = url
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self) -> None:
+        try:
+            import tempfile
+            import urllib.request
+
+            req = urllib.request.Request(
+                self._url, headers={"User-Agent": "TranscriptionVocaleFR"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                total = int(resp.headers.get("Content-Length", 0) or 0)
+                # Fichier temporaire .exe (conservé après fermeture).
+                fd, tmp_path = tempfile.mkstemp(suffix="_TranscriptionVocaleFR-Setup.exe")
+                received = 0
+                with os.fdopen(fd, "wb") as out:
+                    while True:
+                        if self._cancel:
+                            raise RuntimeError("cancelled")
+                        chunk = resp.read(262144)  # 256 Ko
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        received += len(chunk)
+                        self.progress.emit(received, total)
+            self.finished.emit(tmp_path)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+        finally:
+            self.done.emit()
+
+
+class UpdateDialog(QDialog):
+    """Jolie fenêtre de mise à jour : progression du téléchargement puis
+    lancement silencieux de l'installeur. L'utilisateur n'a rien à faire."""
+
+    def __init__(self, parent, tr, qss: str, new_tag: str, installer_url: str) -> None:
+        super().__init__(parent)
+        self._tr = tr
+        self._url = installer_url
+        self._new_tag = new_tag
+        self._thread: QThread | None = None
+        self._worker: UpdateDownloader | None = None
+        self._installer_path: str | None = None
+
+        self.setModal(True)
+        self.setFixedSize(440, 240)
+        self.setStyleSheet(qss)
+        self.setWindowTitle(tr("update_dl_title"))
+        # Empêche la fermeture pendant le travail (pas de bouton close actif).
+        self.setWindowFlag(Qt.WindowCloseButtonHint, False)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(28, 26, 28, 24)
+        root.setSpacing(16)
+        root.setAlignment(Qt.AlignTop)
+
+        icon = QLabel("⬇")
+        icon.setObjectName("updIcon")
+        icon.setAlignment(Qt.AlignCenter)
+        root.addWidget(icon)
+
+        self.title = QLabel(tr("update_dl_heading", ver=new_tag))
+        self.title.setObjectName("updTitle")
+        self.title.setAlignment(Qt.AlignCenter)
+        root.addWidget(self.title)
+
+        self.bar = QProgressBar()
+        self.bar.setObjectName("updBar")
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(8)
+        self.bar.setRange(0, 100)
+        self.bar.setValue(0)
+        root.addWidget(self.bar)
+
+        self.status = QLabel(tr("update_dl_starting"))
+        self.status.setObjectName("updStatus")
+        self.status.setAlignment(Qt.AlignCenter)
+        root.addWidget(self.status)
+
+    def start(self) -> None:
+        """Démarre le téléchargement dès l'ouverture."""
+        thread = QThread(self)
+        worker = UpdateDownloader(self._url)
+        worker.moveToThread(thread)
+        self._thread = thread
+        self._worker = worker
+        worker.progress.connect(self._on_progress)
+        worker.finished.connect(self._on_downloaded)
+        worker.failed.connect(self._on_failed)
+        thread.started.connect(worker.run)
+        worker.done.connect(thread.quit)
+        worker.done.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _on_progress(self, received: int, total: int) -> None:
+        if total > 0:
+            pct = int(received * 100 / total)
+            self.bar.setRange(0, 100)
+            self.bar.setValue(pct)
+            mb_r = received / (1024 * 1024)
+            mb_t = total / (1024 * 1024)
+            self.status.setText(
+                self._tr("update_dl_progress", got=f"{mb_r:.0f}", tot=f"{mb_t:.0f}"))
+        else:
+            self.bar.setRange(0, 0)  # indéterminé
+            self.status.setText(self._tr("update_dl_starting"))
+
+    def _on_downloaded(self, path: str) -> None:
+        self._installer_path = path
+        self.bar.setRange(0, 100)
+        self.bar.setValue(100)
+        self.status.setText(self._tr("update_dl_installing"))
+        # Lance l'installeur en silencieux puis ferme l'app.
+        QTimer.singleShot(600, self._launch_installer)
+
+    def _launch_installer(self) -> None:
+        if not self._installer_path:
+            self._on_failed("installateur introuvable")
+            return
+        try:
+            # /SILENT : installation automatique avec petite barre de progression
+            # native de l'installeur ; /CLOSEAPPLICATIONS pour remplacer les
+            # fichiers ; on ferme l'app pour libérer les fichiers.
+            import subprocess
+            subprocess.Popen(
+                [self._installer_path, "/SILENT", "/CLOSEAPPLICATIONS",
+                 "/RESTARTAPPLICATIONS", "/NORESTART"],
+                close_fds=True,
+            )
+            # Ferme l'application : l'installeur prend le relais.
+            QTimer.singleShot(300, self._quit_app)
+        except Exception as exc:  # noqa: BLE001
+            self._on_failed(str(exc))
+
+    def _quit_app(self) -> None:
+        self.accept()
+        QApplication.instance().quit()
+
+    def _on_failed(self, err: str) -> None:
+        self.setWindowFlag(Qt.WindowCloseButtonHint, True)
+        self.bar.setRange(0, 100)
+        self.bar.setValue(0)
+        self.status.setText(self._tr("update_dl_failed"))
+        QMessageBox.warning(self, self._tr("update_error_title"),
+                            self._tr("update_error", err=err))
+        self.reject()
 
 
 # =========================================================================== #
@@ -969,7 +1163,7 @@ class MainWindow(QMainWindow):
         thread.finished.connect(self._on_update_thread_done)
         thread.start()
 
-    def _on_update_result(self, tag: str) -> None:
+    def _on_update_result(self, tag: str, installer_url: str) -> None:
         if not tag:
             self._on_update_failed("réponse vide")
             return
@@ -982,7 +1176,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.Yes | QMessageBox.No,
             )
             if answer == QMessageBox.Yes:
-                QDesktopServices.openUrl(QUrl(RELEASES_PAGE))
+                if installer_url:
+                    # Mise à jour automatique : jolie fenêtre + installeur silencieux.
+                    dlg = UpdateDialog(self, self.tr, build_qss(self._theme),
+                                       tag, installer_url)
+                    dlg.start()
+                    dlg.exec()
+                else:
+                    # Pas d'installeur trouvé : ouvre la page (repli).
+                    QDesktopServices.openUrl(QUrl(RELEASES_PAGE))
             self._set_status("ready")
         else:
             QMessageBox.information(

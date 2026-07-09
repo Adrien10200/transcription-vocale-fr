@@ -11,7 +11,7 @@
 #define MyAppName "Transcription Vocale FR"
 #define MyAppExeName "Transcription Vocale FR.exe"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.4.0"
+  #define MyAppVersion "1.5.0"
 #endif
 #define MyAppPublisher "Adrien10200"
 #define MyAppURL "https://github.com/Adrien10200/transcription-vocale-fr"
@@ -59,7 +59,10 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
+; Installation interactive : propose de lancer l'app à la fin.
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; Mise à jour silencieuse (auto-update) : relance l'app automatiquement.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: WizardSilent
 
 [UninstallDelete]
 ; On NE supprime PAS le cache modèle : l'utilisateur peut réinstaller sans
