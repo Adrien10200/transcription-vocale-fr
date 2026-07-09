@@ -11,9 +11,9 @@
 #define MyAppName "Transcription Vocale FR"
 #define MyAppExeName "Transcription Vocale FR.exe"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.5.0"
+  #define MyAppVersion "1.6.0"
 #endif
-#define MyAppPublisher "Adrien10200"
+#define MyAppPublisher "Adrien"
 #define MyAppURL "https://github.com/Adrien10200/transcription-vocale-fr"
 
 [Setup]
