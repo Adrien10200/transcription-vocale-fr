@@ -64,6 +64,8 @@ def main() -> int:
         beam = int(sys.argv[5])
     except ValueError:
         beam = 8
+    # 7e argument optionnel : "1" pour activer la diarisation.
+    diarize = len(sys.argv) > 6 and sys.argv[6] == "1"
 
     lang = None if language.lower() == "auto" else language
 
@@ -82,7 +84,22 @@ def main() -> int:
             language=lang,
             compute_type=compute,
             beam_size=beam,
+            diarize=diarize,
         )
+
+        # Vérifie qu'un flux audio décodable existe (ex. MP4 vidéo sans son).
+        try:
+            import av
+            container = av.open(audio_path)
+            has_audio = any(s.type == "audio" for s in container.streams)
+            container.close()
+            if not has_audio:
+                emit({"type": "failed",
+                      "message": "no_audio_track"})
+                return 1
+        except Exception:  # noqa: BLE001
+            # Si la sonde échoue, on laisse le décodeur principal tenter quand même.
+            pass
 
         transcriber = Transcriber()
         transcriber.load(options)
@@ -91,7 +108,8 @@ def main() -> int:
 
         def on_segment(s) -> None:
             emit({"type": "segment", "index": s.index,
-                  "start": s.start, "end": s.end, "text": s.text})
+                  "start": s.start, "end": s.end, "text": s.text,
+                  "speaker": s.speaker})
 
         result = transcriber.transcribe(
             audio_path, options, on_segment=on_segment,

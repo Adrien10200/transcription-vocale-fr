@@ -128,13 +128,28 @@ MODEL_CACHE = _resolve_model_cache()
 os.environ["HF_HOME"] = str(MODEL_CACHE)
 os.environ["HUGGINGFACE_HUB_CACHE"] = str(MODEL_CACHE)
 
+# IMPORTANT : désactive les liens symboliques du cache HuggingFace.
+# Par défaut, HF crée des symlinks snapshots/ -> blobs/ ; ces liens sont
+# fragiles sous Windows (droits, copie, décompression, installeur) et peuvent
+# « casser », ce qui pousse HF à re-télécharger le modèle. En désactivant les
+# symlinks, les fichiers sont copiés directement : le cache est autonome et
+# robuste (survit aux copies/mises à jour/installeur).
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
+
+# Taille minimale plausible du poids « model.bin » de large-v3 (~3 Go).
+# Sert à distinguer un cache complet d'un cache partiel/corrompu.
+_MIN_MODEL_BIN_BYTES = 500 * 1024 * 1024  # 500 Mo (marge large, medium ~1.5 Go)
+
 
 def _model_is_cached(model_name: str) -> bool:
-    """Vrai si le modèle demandé est déjà présent (blob complet) dans le cache.
+    """Vrai si le modèle demandé est réellement présent ET complet dans le cache.
 
-    On vérifie non seulement le dossier du dépôt, mais aussi qu'un blob
-    volumineux (le poids `model.bin`, ~3 Go) existe réellement — pour ne pas
-    activer le mode hors-ligne sur un cache partiel/corrompu.
+    Robuste aux symlinks cassés : on vérifie qu'un fichier `model.bin`
+    (fichier réel OU lien résolvable) d'une taille plausible existe dans un
+    snapshot. On tolère aussi un `model.bin` directement présent (mode sans
+    symlink) et on vérifie le blob correspondant si besoin.
     """
     repo = f"models--Systran--faster-whisper-{model_name}"
     repo_dir = MODEL_CACHE / repo
@@ -143,11 +158,22 @@ def _model_is_cached(model_name: str) -> bool:
     snapshots = repo_dir / "snapshots"
     if not snapshots.is_dir():
         return False
-    # Un snapshot doit contenir un model.bin (lien ou fichier) résolvable.
+
     for snap in snapshots.iterdir():
+        if not snap.is_dir():
+            continue
         model_bin = snap / "model.bin"
         try:
-            if model_bin.exists() and model_bin.stat().st_size > 0:
+            # exists() suit les symlinks ; si le lien est cassé -> False.
+            if not model_bin.exists():
+                continue
+            size = model_bin.stat().st_size  # suit le lien vers le blob réel
+            # Certains liens rapportent 0 : on tente alors de résoudre la cible.
+            if size == 0:
+                target = model_bin.resolve()
+                if target.exists():
+                    size = target.stat().st_size
+            if size >= _MIN_MODEL_BIN_BYTES:
                 return True
         except OSError:
             continue
@@ -279,6 +305,67 @@ def apply_corrections(text: str, corrections: list[dict] | None = None) -> str:
     return text
 
 
+# --------------------------------------------------------------------------- #
+# Diarisation légère (heuristique par pauses).
+#
+# Sans modèle neuronal lourd : on attribue un numéro d'interlocuteur en se
+# basant sur les pauses entre segments. Une pause « longue » (typiquement un
+# tour de parole) fait basculer sur l'interlocuteur suivant. Simple, rapide,
+# 100 % hors-ligne. Utile pour distinguer les tours de parole d'une conversation.
+# --------------------------------------------------------------------------- #
+def assign_speakers(
+    segments: list["Segment"],
+    pause_threshold: float = 1.0,
+    max_speakers: int = 2,
+) -> None:
+    """Attribue un numéro d'interlocuteur (1..max_speakers) à chaque segment,
+    en place. Bascule d'interlocuteur après une pause >= pause_threshold s.
+
+    Heuristique volontairement simple : alterne entre interlocuteurs à chaque
+    silence marqué. Convient aux dialogues à 2 voix (le cas le plus courant).
+    """
+    if not segments:
+        return
+    current = 1
+    prev_end = None
+    for seg in segments:
+        if prev_end is not None:
+            gap = seg.start - prev_end
+            if gap >= pause_threshold:
+                # Changement de tour de parole : passe à l'interlocuteur suivant.
+                current = current % max_speakers + 1
+        seg.speaker = current
+        prev_end = seg.end
+
+
+def format_diarized_text(segments: list["Segment"], label: str = "Interlocuteur") -> str:
+    """Assemble le texte en regroupant par tours de parole :
+        Interlocuteur 1 : ...
+        Interlocuteur 2 : ...
+    Regroupe les segments consécutifs d'un même interlocuteur.
+    """
+    if not segments:
+        return ""
+    lines: list[str] = []
+    current_speaker = None
+    buffer: list[str] = []
+
+    def flush():
+        if buffer and current_speaker is not None:
+            lines.append(f"{label} {current_speaker} : " + " ".join(buffer).strip())
+
+    for seg in segments:
+        spk = seg.speaker if seg.speaker is not None else 1
+        if spk != current_speaker:
+            flush()
+            buffer = []
+            current_speaker = spk
+        if seg.text:
+            buffer.append(seg.text)
+    flush()
+    return "\n".join(lines).strip()
+
+
 MEDIA_EXTS = {
     ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma",
     ".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".3gp", ".amr",
@@ -309,6 +396,7 @@ class TranscriptionOptions:
     cpu_threads: int = 0                 # 0 => auto
     initial_prompt: str | None = None
     make_srt: bool = False
+    diarize: bool = False                # identifier les interlocuteurs
 
 
 @dataclass
@@ -317,6 +405,7 @@ class Segment:
     start: float
     end: float
     text: str
+    speaker: int | None = None           # numéro d'interlocuteur (1, 2…) si diarisation
 
 
 @dataclass
@@ -440,8 +529,13 @@ class Transcriber:
                     f"{format_timestamp(seg.end)}\n{clean}\n"
                 )
 
-        full_text = " ".join(s.text for s in segments if s.text)
-        full_text = " ".join(full_text.split()).strip()
+        # Diarisation légère : attribue « Interlocuteur 1/2… » selon les pauses.
+        if options.diarize and segments:
+            assign_speakers(segments)
+            full_text = format_diarized_text(segments)
+        else:
+            full_text = " ".join(s.text for s in segments if s.text)
+            full_text = " ".join(full_text.split()).strip()
 
         return TranscriptionResult(
             text=full_text,

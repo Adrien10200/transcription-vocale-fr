@@ -63,7 +63,7 @@ jobs:
           Write-Host "Version : $v"
           "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Archiver l'application (ZIP)
+      - name: Archiver l'application (ZIP portable)
         shell: pwsh
         run: |
           $name = "Transcription-Vocale-FR-${{ steps.version.outputs.version }}-win64.zip"
@@ -72,11 +72,27 @@ jobs:
           "asset=$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         id: package
 
-      - name: Téléverser l'artefact de build
+      - name: Installer Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Construire l'installeur (Inno Setup)
+        id: installer
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.version.outputs.version }}".TrimStart('v')
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=$ver installer.iss
+          $setup = Get-ChildItem "installer_output\*.exe" | Select-Object -First 1
+          if (-not $setup) { throw "Installeur introuvable après compilation" }
+          Write-Host "Installeur créé : $($setup.Name)"
+          "installer=$($setup.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Téléverser les artefacts de build
         uses: actions/upload-artifact@v4
         with:
           name: application-windows
-          path: ${{ steps.package.outputs.asset }}
+          path: |
+            ${{ steps.package.outputs.asset }}
+            ${{ steps.installer.outputs.installer }}
           retention-days: 30
 
       - name: Publier la release
@@ -88,18 +104,25 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
-          files: ${{ steps.package.outputs.asset }}
+          files: |
+            ${{ steps.package.outputs.asset }}
+            ${{ steps.installer.outputs.installer }}
           body: |
             ## Transcription Vocale FR — ${{ steps.version.outputs.version }}
 
-            Application Windows autonome de transcription vocale française
+            Application Windows de transcription vocale française
             (haute précision, 100 % en local).
 
-            ### Installation
-            1. Téléchargez le fichier `.zip` ci-dessous.
-            2. Décompressez-le où vous voulez.
-            3. Lancez **`Transcription Vocale FR.exe`**.
+            ### Installation (recommandé) — programme d'installation
+            1. Téléchargez **`TranscriptionVocaleFR-Setup-….exe`**.
+            2. Lancez-le (aucun droit administrateur requis).
+            3. Le modèle est mis en cache **hors** du dossier de l'app : les
+               futures mises à jour **ne re-téléchargent jamais** les ~3 Go.
+
+            ### Version portable (ZIP)
+            1. Téléchargez le `.zip`, décompressez-le où vous voulez.
+            2. Lancez **`Transcription Vocale FR.exe`**.
 
             > Au premier lancement, le modèle `large-v3` (~3 Go) est téléchargé
-            > automatiquement puis mis en cache localement. Les lancements
-            > suivants sont immédiats.
+            > automatiquement puis mis en cache. Les lancements suivants sont
+            > immédiats.

@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QPlainTextEdit, QFileDialog, QFrame, QProgressBar,
     QMessageBox, QComboBox, QSizePolicy, QDialog, QTableWidget,
-    QTableWidgetItem, QHeaderView, QAbstractItemView,
+    QTableWidgetItem, QHeaderView, QAbstractItemView, QCheckBox,
 )
 
 from transcriber_core import (
@@ -103,6 +103,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "corr_placeholder_from": "e.g. Volio",
         "corr_placeholder_to": "e.g. Voelio",
         "corr_count": "{n} correction(s)",
+        "diarize": "Identify speakers",
+        "diarize_tip": "Detect turn-taking in a conversation (Speaker 1, 2…). "
+                       "Lightweight, pause-based heuristic.",
+        "no_audio": "This file has no audio track (video-only?). "
+                    "Please provide a file that contains sound.",
     },
     "fr": {
         "app_title": "Transcription Vocale FR",
@@ -163,6 +168,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "corr_placeholder_from": "ex. Volio",
         "corr_placeholder_to": "ex. Voelio",
         "corr_count": "{n} correction(s)",
+        "diarize": "Identifier les interlocuteurs",
+        "diarize_tip": "Détecte les tours de parole d'une conversation "
+                       "(Interlocuteur 1, 2…). Heuristique légère basée sur les pauses.",
+        "no_audio": "Ce fichier n'a pas de piste audio (vidéo seule ?). "
+                    "Veuillez fournir un fichier contenant du son.",
     },
 }
 
@@ -313,6 +323,18 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none
 
 QMessageBox {{ background-color: {t.bg}; }}
 QMessageBox QLabel {{ color: {t.text}; }}
+
+QCheckBox#diarizeCheck {{
+    color: {t.text_dim}; font-size: 13px; spacing: 8px; padding: 2px;
+}}
+QCheckBox#diarizeCheck::indicator {{
+    width: 18px; height: 18px; border-radius: 5px;
+    border: 1px solid {t.border}; background-color: {t.surface};
+}}
+QCheckBox#diarizeCheck::indicator:hover {{ border-color: {t.border_focus}; }}
+QCheckBox#diarizeCheck::indicator:checked {{
+    background-color: {t.accent}; border-color: {t.accent};
+}}
 
 QPushButton#corrButton {{
     background-color: {t.surface}; color: {t.text_dim};
@@ -679,6 +701,15 @@ class MainWindow(QMainWindow):
         file_row.addWidget(self.quality_combo)
         root.addLayout(file_row)
 
+        # Option : identifier les interlocuteurs (diarisation légère)
+        opt_row = QHBoxLayout()
+        self.diarize_check = QCheckBox("")
+        self.diarize_check.setObjectName("diarizeCheck")
+        self.diarize_check.setCursor(Qt.PointingHandCursor)
+        opt_row.addWidget(self.diarize_check)
+        opt_row.addStretch(1)
+        root.addLayout(opt_row)
+
         # Boutons
         action_row = QHBoxLayout()
         action_row.setSpacing(10)
@@ -767,6 +798,8 @@ class MainWindow(QMainWindow):
         self.quality_combo.setToolTip(self.tr("quality_tip"))
         self.corrections_btn.setText(self.tr("corrections"))
         self.corrections_btn.setToolTip(self.tr("corrections_tip"))
+        self.diarize_check.setText(self.tr("diarize"))
+        self.diarize_check.setToolTip(self.tr("diarize_tip"))
 
         # Boutons
         self.transcribe_btn.setText(self.tr("transcribe"))
@@ -823,7 +856,8 @@ class MainWindow(QMainWindow):
         """Retourne (programme, arguments) pour lancer le worker.
         Fonctionne en mode script (python) comme en mode exe figé."""
         model = self.quality_combo.currentData()
-        args_tail = [self._current_file, model, "fr", "int8", "8"]
+        diarize = "1" if self.diarize_check.isChecked() else "0"
+        args_tail = [self._current_file, model, "fr", "int8", "8", diarize]
         if getattr(sys, "frozen", False):
             # Dans l'exe : on relance l'exe lui-même avec un drapeau spécial.
             return sys.executable, ["--run-worker", *args_tail]
@@ -931,8 +965,11 @@ class MainWindow(QMainWindow):
 
         elif etype == "failed":
             self._set_status("failed_status")
-            QMessageBox.critical(self, self.tr("error"),
-                                 self.tr("transcribe_error", err=evt.get("message", "")))
+            raw = evt.get("message", "")
+            # Message clair pour un fichier sans piste audio (ex. MP4 vidéo seule).
+            msg = self.tr("no_audio") if raw == "no_audio_track" else \
+                self.tr("transcribe_error", err=raw)
+            QMessageBox.critical(self, self.tr("error"), msg)
 
     def _on_proc_error(self, _error) -> None:
         # Une erreur de process (ex. « crashed ») après un kill volontaire est
@@ -959,6 +996,7 @@ class MainWindow(QMainWindow):
         self.drop.set_enabled_visual(not busy)
         self.quality_combo.setEnabled(not busy)
         self.corrections_btn.setEnabled(not busy)
+        self.diarize_check.setEnabled(not busy)
         self.theme_combo.setEnabled(True)  # thème toujours changeable
         if busy:
             self.copy_btn.setEnabled(False)
