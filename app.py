@@ -116,7 +116,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "update_checking": "Checking for updates…",
         "update_available_title": "Update available",
         "update_available": "A new version is available: {new} "
-                            "(you have {cur}).\n\nOpen the download page?",
+                            "(you have {cur}).\n\nUpdate now? "
+                            "The app will download and install it automatically.",
+        "update_now": "Update now",
+        "update_later": "Later",
         "update_uptodate_title": "Up to date",
         "update_uptodate": "You have the latest version ({cur}).",
         "update_error_title": "Update check failed",
@@ -196,7 +199,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "update_checking": "Recherche de mises à jour…",
         "update_available_title": "Mise à jour disponible",
         "update_available": "Une nouvelle version est disponible : {new} "
-                            "(vous avez {cur}).\n\nOuvrir la page de téléchargement ?",
+                            "(vous avez {cur}).\n\nMettre à jour maintenant ? "
+                            "L'application la télécharge et l'installe automatiquement.",
+        "update_now": "Mettre à jour",
+        "update_later": "Plus tard",
         "update_uptodate_title": "À jour",
         "update_uptodate": "Vous avez la dernière version ({cur}).",
         "update_error_title": "Échec de la vérification",
@@ -1170,12 +1176,14 @@ class MainWindow(QMainWindow):
         latest = _parse_version(tag)
         current = _parse_version(__version__)
         if latest > current:
-            answer = QMessageBox.question(
-                self, self.tr("update_available_title"),
-                self.tr("update_available", new=tag, cur=f"v{__version__}"),
-                QMessageBox.Yes | QMessageBox.No,
-            )
-            if answer == QMessageBox.Yes:
+            box = QMessageBox(self)
+            box.setWindowTitle(self.tr("update_available_title"))
+            box.setText(self.tr("update_available", new=tag, cur=f"v{__version__}"))
+            box.setIcon(QMessageBox.Question)
+            yes_btn = box.addButton(self.tr("update_now"), QMessageBox.AcceptRole)
+            box.addButton(self.tr("update_later"), QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is yes_btn:
                 if installer_url:
                     # Mise à jour automatique : jolie fenêtre + installeur silencieux.
                     dlg = UpdateDialog(self, self.tr, build_qss(self._theme),

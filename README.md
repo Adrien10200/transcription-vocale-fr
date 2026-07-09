@@ -61,15 +61,18 @@ A simple, modern desktop app powered by
 
 ### ⚠️ Windows SmartScreen warning
 
-The app is signed with a **self-signed certificate**, so Windows may show a
-blue **“Windows protected your PC”** screen the first time. This is expected for
-apps not signed by a commercial certificate authority. To run it:
+The app is signed with a **self-signed certificate**, so Windows shows a blue
+**“Windows protected your PC”** screen the first time, and SmartScreen displays
+**Publisher: Unknown**. This is normal: a self-signed certificate is not issued
+by a trusted certificate authority, so Windows cannot verify the publisher.
+Removing this would require a paid OV/EV code-signing certificate. To run the app:
 
 1. Click **More info**.
 2. Click **Run anyway**.
 
-The app is open-source — you can review every line here. Use the
-**Check for updates** button inside the app to get new versions.
+The app is open-source — you can review every line here. Once installed, use the
+**Check for updates** button inside the app: it downloads and installs new
+versions automatically (no manual download).
 
 ---
 
