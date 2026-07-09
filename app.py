@@ -285,7 +285,7 @@ QComboBox {{
     border: 1px solid {t.border}; border-radius: 9px;
     padding: 8px 12px; min-width: 150px;
 }}
-QComboBox#themeCombo {{ min-width: 108px; }}
+QComboBox#themeCombo {{ min-width: 84px; }}
 QComboBox:hover {{ border-color: {t.border_focus}; }}
 QComboBox::drop-down {{ border: none; width: 26px; }}
 QComboBox::down-arrow {{ width: 0; height: 0; }}
@@ -742,6 +742,8 @@ class MainWindow(QMainWindow):
         self.theme_lbl.setAlignment(Qt.AlignRight)
         self.theme_combo = QComboBox()
         self.theme_combo.setObjectName("themeCombo")
+        # S'adapte au libellé courant : compact, sans jamais couper le texte.
+        self.theme_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         for key in THEMES:
             self.theme_combo.addItem("", key)  # libellés remplis par _retranslate
         idx = self.theme_combo.findData(self._theme.key)
