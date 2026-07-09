@@ -38,6 +38,8 @@ A simple, modern desktop app powered by
 - ⚡ **Fluid interface** — transcription runs in the background, text streams in live, and everything is **cancellable**.
 - 📋 **Copy / Save** the result in one click (`.txt` or `.srt` subtitles).
 - 📝 **Custom corrections** — teach the app your vocabulary (e.g. `Volio` → `Voelio`); replacements are applied automatically and **persist across upgrades**.
+- 🗣 **Speaker identification** — optional lightweight diarization tags turn-taking (`Interlocuteur 1 / 2…`) in conversations, fully offline.
+- 📦 **Installer** — one-click setup; the model cache is stored **outside** the app folder, so updates never re-download the ~3 GB model.
 - 🎨 **3 themes** — 🌙 Dark · ☀️ Light · 🎃 Halloween.
 - 🌍 **Bilingual UI** — switch between English and French with one click.
 - 🎬 **Many formats** — MP3, WAV, M4A, FLAC, OGG, MP4, MKV, MOV… (audio decoding built in via PyAV, no external ffmpeg).
@@ -216,6 +218,8 @@ Application de bureau simple et moderne, propulsée par
 - ⚡ **Interface fluide** — transcription en arrière-plan, texte affiché en direct, **annulable** à tout moment.
 - 📋 **Copier / Enregistrer** le résultat en un clic (`.txt` ou sous-titres `.srt`).
 - 📝 **Corrections personnalisées** — apprenez votre vocabulaire à l'app (ex. `Volio` → `Voelio`) ; les remplacements sont appliqués automatiquement et **conservés après une mise à jour**.
+- 🗣 **Identification des interlocuteurs** — diarisation légère optionnelle qui marque les tours de parole (`Interlocuteur 1 / 2…`), 100 % hors-ligne.
+- 📦 **Installeur** — installation en un clic ; le cache du modèle est stocké **hors** du dossier de l'app, donc les mises à jour ne re-téléchargent jamais les ~3 Go.
 - 🎨 **3 thèmes** — 🌙 Sombre · ☀️ Clair · 🎃 Halloween.
 - 🌍 **Interface bilingue** — basculez entre anglais et français en un clic.
 - 🎬 **Multi-formats** — MP3, WAV, M4A, FLAC, OGG, MP4, MKV, MOV… (décodage intégré via PyAV, sans ffmpeg externe).
