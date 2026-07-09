@@ -22,8 +22,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QProcess, QSettings
-from PySide6.QtGui import QGuiApplication, QIcon, QPixmap, QPainter, QColor, QPen
+from PySide6.QtCore import Qt, Signal, QProcess, QSettings, QThread, QObject
+from PySide6.QtGui import (
+    QGuiApplication, QIcon, QPixmap, QPainter, QColor, QPen, QDesktopServices,
+)
+from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QPlainTextEdit, QFileDialog, QFrame, QProgressBar,
@@ -35,6 +38,7 @@ from transcriber_core import (
     is_media_file, MEDIA_EXTS, APP_ROOT, RESOURCE_ROOT,
     load_corrections, save_corrections,
 )
+from version import __version__, RELEASES_API, RELEASES_PAGE
 
 
 APP_NAME = "Transcription Vocale FR"
@@ -108,6 +112,15 @@ STRINGS: dict[str, dict[str, str]] = {
                        "Lightweight, pause-based heuristic.",
         "no_audio": "This file has no audio track (video-only?). "
                     "Please provide a file that contains sound.",
+        "update_check": "Check for updates",
+        "update_checking": "Checking for updates…",
+        "update_available_title": "Update available",
+        "update_available": "A new version is available: {new} "
+                            "(you have {cur}).\n\nOpen the download page?",
+        "update_uptodate_title": "Up to date",
+        "update_uptodate": "You have the latest version ({cur}).",
+        "update_error_title": "Update check failed",
+        "update_error": "Could not check for updates:\n{err}",
     },
     "fr": {
         "app_title": "Transcription Vocale FR",
@@ -173,6 +186,15 @@ STRINGS: dict[str, dict[str, str]] = {
                        "(Interlocuteur 1, 2…). Heuristique légère basée sur les pauses.",
         "no_audio": "Ce fichier n'a pas de piste audio (vidéo seule ?). "
                     "Veuillez fournir un fichier contenant du son.",
+        "update_check": "Vérifier les mises à jour",
+        "update_checking": "Recherche de mises à jour…",
+        "update_available_title": "Mise à jour disponible",
+        "update_available": "Une nouvelle version est disponible : {new} "
+                            "(vous avez {cur}).\n\nOuvrir la page de téléchargement ?",
+        "update_uptodate_title": "À jour",
+        "update_uptodate": "Vous avez la dernière version ({cur}).",
+        "update_error_title": "Échec de la vérification",
+        "update_error": "Impossible de vérifier les mises à jour :\n{err}",
     },
 }
 
@@ -299,6 +321,15 @@ QPushButton#langButton {{
     padding: 8px 0; font-size: 13px; font-weight: 700;
 }}
 QPushButton#langButton:hover {{ border-color: {t.border_focus}; color: {t.border_focus}; }}
+
+QLabel#versionLabel {{ color: {t.text_faint}; font-size: 12px; }}
+QPushButton#updateButton {{
+    background-color: transparent; color: {t.border_focus};
+    border: none; padding: 0; font-size: 12px; font-weight: 600;
+    text-align: left;
+}}
+QPushButton#updateButton:hover {{ color: {t.accent_hover}; text-decoration: underline; }}
+QPushButton#updateButton:disabled {{ color: {t.text_faint}; }}
 
 QProgressBar {{ background-color: {t.surface_alt}; border: none; border-radius: 3px; }}
 QProgressBar::chunk {{ background-color: {t.border_focus}; border-radius: 3px; }}
@@ -574,6 +605,51 @@ class CorrectionsDialog(QDialog):
 
 
 # =========================================================================== #
+#  VÉRIFICATION DES MISES À JOUR (en arrière-plan)
+# =========================================================================== #
+def _parse_version(v: str) -> tuple:
+    """Convertit 'v1.4.0' ou '1.4.0' en tuple comparable (1, 4, 0)."""
+    v = v.strip().lstrip("vV")
+    parts = []
+    for chunk in v.split("."):
+        num = ""
+        for ch in chunk:
+            if ch.isdigit():
+                num += ch
+            else:
+                break
+        parts.append(int(num) if num else 0)
+    return tuple(parts) if parts else (0,)
+
+
+class UpdateChecker(QObject):
+    """Interroge l'API GitHub Releases dans un thread séparé (non bloquant)."""
+
+    result = Signal(str)   # tag de la dernière version (ex. "v1.4.0")
+    failed = Signal(str)
+    done = Signal()
+
+    def run(self) -> None:
+        try:
+            import json
+            import urllib.request
+
+            req = urllib.request.Request(
+                RELEASES_API,
+                headers={"Accept": "application/vnd.github+json",
+                         "User-Agent": "TranscriptionVocaleFR"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            tag = str(data.get("tag_name", "")).strip()
+            self.result.emit(tag)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+        finally:
+            self.done.emit()
+
+
+# =========================================================================== #
 #  FENÊTRE PRINCIPALE
 # =========================================================================== #
 class MainWindow(QMainWindow):
@@ -590,6 +666,8 @@ class MainWindow(QMainWindow):
         self._result: dict | None = None
         self._live_parts: list[str] = []
         self._last_status_key: tuple[str, dict] | None = None
+        self._update_thread: QThread | None = None
+        self._update_worker: UpdateChecker | None = None
 
         # Langue : anglais par défaut.
         lang = self._settings.value("lang", "en")
@@ -639,6 +717,21 @@ class MainWindow(QMainWindow):
         self.subtitle.setObjectName("subtitle")
         head_col.addWidget(self.header)
         head_col.addWidget(self.subtitle)
+
+        # Ligne version + bouton « Vérifier les mises à jour »
+        ver_row = QHBoxLayout()
+        ver_row.setSpacing(10)
+        self.version_lbl = QLabel(f"v{__version__}")
+        self.version_lbl.setObjectName("versionLabel")
+        self.update_btn = QPushButton("")
+        self.update_btn.setObjectName("updateButton")
+        self.update_btn.setCursor(Qt.PointingHandCursor)
+        self.update_btn.clicked.connect(self._check_updates)
+        ver_row.addWidget(self.version_lbl)
+        ver_row.addWidget(self.update_btn)
+        ver_row.addStretch(1)
+        head_col.addLayout(ver_row)
+
         top.addLayout(head_col, stretch=1)
 
         # Colonne thème (label au-dessus, combo en dessous)
@@ -772,6 +865,7 @@ class MainWindow(QMainWindow):
         self.subtitle.setText(self.tr("subtitle"))
         self.lang_btn.setText(self.tr("lang_button"))
         self.lang_btn.setToolTip(self.tr("lang_button_tip"))
+        self.update_btn.setText(self.tr("update_check"))
         self.theme_lbl.setText(self.tr("theme"))
 
         # Libellés des thèmes (sans changer la sélection courante)
@@ -850,6 +944,62 @@ class MainWindow(QMainWindow):
         dialog = CorrectionsDialog(self, self.tr, build_qss(self._theme))
         if dialog.exec() == QDialog.Accepted:
             self._set_status("corr_saved")
+
+    # ---- Vérification des mises à jour -------------------------------- #
+    def _check_updates(self) -> None:
+        if self._update_thread is not None:
+            return  # déjà en cours
+        self.update_btn.setEnabled(False)
+        self._set_status("update_checking")
+
+        thread = QThread(self)
+        worker = UpdateChecker()
+        worker.moveToThread(thread)
+        self._update_thread = thread
+        self._update_worker = worker
+
+        worker.result.connect(self._on_update_result)
+        worker.failed.connect(self._on_update_failed)
+        thread.started.connect(worker.run)
+        worker.done.connect(thread.quit)
+        worker.done.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_update_thread_done)
+        thread.start()
+
+    def _on_update_result(self, tag: str) -> None:
+        if not tag:
+            self._on_update_failed("réponse vide")
+            return
+        latest = _parse_version(tag)
+        current = _parse_version(__version__)
+        if latest > current:
+            answer = QMessageBox.question(
+                self, self.tr("update_available_title"),
+                self.tr("update_available", new=tag, cur=f"v{__version__}"),
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if answer == QMessageBox.Yes:
+                QDesktopServices.openUrl(QUrl(RELEASES_PAGE))
+            self._set_status("ready")
+        else:
+            QMessageBox.information(
+                self, self.tr("update_uptodate_title"),
+                self.tr("update_uptodate", cur=f"v{__version__}"),
+            )
+            self._set_status("ready")
+
+    def _on_update_failed(self, err: str) -> None:
+        QMessageBox.warning(
+            self, self.tr("update_error_title"),
+            self.tr("update_error", err=err),
+        )
+        self._set_status("ready")
+
+    def _on_update_thread_done(self) -> None:
+        self.update_btn.setEnabled(True)
+        self._update_thread = None
+        self._update_worker = None
 
     # ---- Transcription (processus séparé, annulable par kill) --------- #
     def _worker_command(self) -> tuple[str, list[str]]:

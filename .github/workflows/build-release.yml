@@ -49,6 +49,34 @@ jobs:
         env:
           APP_DIR: "Transcription Vocale FR"
 
+      # Signature de code (certificat AUTO-SIGNÉ).
+      # Note : un certificat auto-signé ne supprime PAS l'alerte SmartScreen
+      # (autorité non reconnue par Windows), mais il « signe » l'exécutable
+      # (éditeur + intégrité), ce qui aide certains antivirus et le sérieux.
+      # Pour supprimer SmartScreen, il faut un certificat OV/EV d'une autorité.
+      - name: Créer un certificat auto-signé et signer l'exe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $cert = New-SelfSignedCertificate `
+            -Type CodeSigningCert `
+            -Subject "CN=Adrien10200, O=Adrien10200, C=FR" `
+            -KeyUsage DigitalSignature `
+            -FriendlyName "Transcription Vocale FR (self-signed)" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -HashAlgorithm SHA256 `
+            -KeyExportPolicy Exportable
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+                      Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw "signtool introuvable" }
+          $exe = "dist\Transcription Vocale FR\Transcription Vocale FR.exe"
+          & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint `
+            /tr http://timestamp.digicert.com /td SHA256 $exe
+          Write-Host "Exe signé (auto-signé)."
+          # Conserve l'empreinte pour signer aussi l'installeur ensuite.
+          "THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SIGNTOOL=$($signtool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Déterminer le nom de version
         id: version
         shell: pwsh
@@ -85,6 +113,14 @@ jobs:
           if (-not $setup) { throw "Installeur introuvable après compilation" }
           Write-Host "Installeur créé : $($setup.Name)"
           "installer=$($setup.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Signer l'installeur (auto-signé)
+        shell: pwsh
+        run: |
+          & "$env:SIGNTOOL" sign /fd SHA256 /sha1 "$env:THUMBPRINT" `
+            /tr http://timestamp.digicert.com /td SHA256 `
+            "${{ steps.installer.outputs.installer }}"
+          Write-Host "Installeur signé (auto-signé)."
 
       - name: Téléverser les artefacts de build
         uses: actions/upload-artifact@v4

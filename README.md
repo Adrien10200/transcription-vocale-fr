@@ -59,6 +59,18 @@ A simple, modern desktop app powered by
 > are instant, and **upgrading the app never re-downloads the model** — the cache
 > lives outside the app folder.
 
+### ⚠️ Windows SmartScreen warning
+
+The app is signed with a **self-signed certificate**, so Windows may show a
+blue **“Windows protected your PC”** screen the first time. This is expected for
+apps not signed by a commercial certificate authority. To run it:
+
+1. Click **More info**.
+2. Click **Run anyway**.
+
+The app is open-source — you can review every line here. Use the
+**Check for updates** button inside the app to get new versions.
+
 ---
 
 ## 🖥 Usage
@@ -236,6 +248,15 @@ Application de bureau simple et moderne, propulsée par
 > automatiquement puis mis en cache dans `%LOCALAPPDATA%\TranscriptionVocaleFR\models`.
 > Les fois suivantes sont immédiates, et **mettre à jour l'application ne
 > re-télécharge jamais le modèle** — le cache est stocké hors du dossier de l'app.
+
+#### ⚠️ Avertissement Windows SmartScreen
+
+L'app est signée avec un **certificat auto-signé** : Windows peut afficher un
+écran bleu **« Windows a protégé votre ordinateur »** au premier lancement.
+C'est normal pour une application non signée par une autorité commerciale.
+Pour l'exécuter : cliquez sur **Informations complémentaires** puis
+**Exécuter quand même**. Utilisez le bouton **Vérifier les mises à jour** dans
+l'app pour obtenir les nouvelles versions.
 
 ### 🖥 Utilisation
 

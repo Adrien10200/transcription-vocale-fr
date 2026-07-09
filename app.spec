@@ -37,6 +37,11 @@ ICON_FILE = os.path.join(PROJECT_DIR, "assets", "icon.ico")
 if not os.path.isfile(ICON_FILE):
     ICON_FILE = None
 
+# Métadonnées de version (éditeur, description, version) intégrées à l'exe.
+VERSION_FILE = os.path.join(PROJECT_DIR, "version_info.txt")
+if not os.path.isfile(VERSION_FILE):
+    VERSION_FILE = None
+
 # --- Bibliothèques dynamiques (moteur de transcription) ------------------- #
 binaries = []
 binaries += collect_dynamic_libs("ctranslate2")
@@ -140,6 +145,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=ICON_FILE,
+    version=VERSION_FILE,
 )
 
 coll = COLLECT(
