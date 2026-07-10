@@ -297,8 +297,3 @@ La CI publie une release à chaque tag `v*` : `git tag v1.0.0 && git push origin
 ### 📄 Licence
 
 Distribué sous licence [MIT](LICENSE).
-
-<div align="center">
-<br/>
-<sub>Fait avec ❤ pour transcrire le français, en local et sans compromis.</sub>
-</div>
