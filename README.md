@@ -25,8 +25,13 @@ A simple, modern desktop app powered by
 [![Whisper](https://img.shields.io/badge/Engine-faster--whisper-ff6f61?style=flat-square)](https://github.com/SYSTRAN/faster-whisper)
 [![Platform](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?style=flat-square&logo=windows&logoColor=white)](#)
 [![License](https://img.shields.io/github/license/Adrien10200/transcription-vocale-fr?style=flat-square&color=blue&label=License)](LICENSE)
+[![Built with AI](https://img.shields.io/badge/Built%20with-AI-8A2BE2?style=flat-square&logo=openai&logoColor=white)](#-built-with-ai--développé-avec-lia)
 
 </div>
+
+> [!NOTE]
+> 🤖 **Built with AI** — This project was developed with the help of an AI
+> coding assistant. See [Built with AI](#-built-with-ai--développé-avec-lia).
 
 ---
 
@@ -197,6 +202,19 @@ MOV, AVI, WEBM…
 
 ---
 
+## 🤖 Built with AI · Développé avec l'IA
+
+**EN —** This project was built with the assistance of an **AI coding assistant**.
+The AI helped design and implement the application (GUI, transcription engine
+integration, installer, auto-update, CI/CD) under human direction and review.
+
+**FR —** Ce projet a été réalisé avec l'aide d'une **IA de programmation**.
+L'IA a participé à la conception et à l'implémentation de l'application
+(interface, intégration du moteur de transcription, installeur, mise à jour
+automatique, CI/CD), sous la direction et la supervision d'un humain.
+
+---
+
 ## 📄 License
 
 Released under the [MIT](LICENSE) license.
@@ -297,7 +315,13 @@ La CI publie une release à chaque tag `v*` : `git tag v1.0.0 && git push origin
 
 Distribué sous licence [MIT](LICENSE).
 
+### 🤖 Développé avec l'IA
+
+Ce projet a été réalisé avec l'aide d'une **IA de programmation**, sous la
+direction et la supervision d'un humain. Voir la section
+[Built with AI](#-built-with-ai--développé-avec-lia).
+
 <div align="center">
 <br/>
-<sub>Fait avec ❤ pour transcrire le français, en local et sans compromis.</sub>
+<sub>Fait avec ❤ (et un peu d'IA) pour transcrire le français, en local et sans compromis.</sub>
 </div>
