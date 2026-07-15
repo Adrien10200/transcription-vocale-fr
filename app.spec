@@ -42,10 +42,14 @@ VERSION_FILE = os.path.join(PROJECT_DIR, "version_info.txt")
 if not os.path.isfile(VERSION_FILE):
     VERSION_FILE = None
 
-# --- Bibliothèques dynamiques (moteur de transcription) ------------------- #
+# --- Bibliothèques dynamiques (moteur de transcription + audio) ----------- #
 binaries = []
 binaries += collect_dynamic_libs("ctranslate2")
 binaries += collect_dynamic_libs("onnxruntime")
+binaries += collect_dynamic_libs("sounddevice")   # PortAudio DLL
+
+# Données de sounddevice (_sounddevice_data avec la DLL PortAudio).
+datas += collect_data_files("sounddevice")
 
 hiddenimports = [
     "faster_whisper",
@@ -53,7 +57,13 @@ hiddenimports = [
     "onnxruntime",
     "tokenizers",
     "av",
+    "sounddevice",
+    "cffi",
+    "_cffi_backend",
+    "numpy",
     "transcribe_worker",   # worker relancé via --run-worker
+    "stream_worker",       # worker de transcription en direct (--run-stream)
+    "audio_recorder",
     "transcriber_core",
 ]
 

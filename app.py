@@ -130,6 +130,18 @@ STRINGS: dict[str, dict[str, str]] = {
         "update_dl_progress": "Downloading… {got} / {tot} MB",
         "update_dl_installing": "Installing… the app will restart automatically.",
         "update_dl_failed": "Update failed.",
+        "record": "Record",
+        "record_stop": "Stop",
+        "record_tip": "Record from your microphone and transcribe it.",
+        "record_recording": "Recording… {sec}s",
+        "record_transcribing": "Transcribing the recording…",
+        "live": "Live",
+        "live_tip": "Live transcription: text appears while you speak.",
+        "live_listening": "Listening… speak now. Click Stop when done.",
+        "mic_label": "Microphone",
+        "mic_default": "Default microphone",
+        "no_mic": "No microphone detected.",
+        "rec_error": "Recording error:\n{err}",
     },
     "fr": {
         "app_title": "Transcription Vocale FR",
@@ -213,6 +225,18 @@ STRINGS: dict[str, dict[str, str]] = {
         "update_dl_progress": "Téléchargement… {got} / {tot} Mo",
         "update_dl_installing": "Installation… l'application va redémarrer automatiquement.",
         "update_dl_failed": "Échec de la mise à jour.",
+        "record": "Enregistrer",
+        "record_stop": "Arrêter",
+        "record_tip": "Enregistrer depuis votre microphone et le transcrire.",
+        "record_recording": "Enregistrement… {sec}s",
+        "record_transcribing": "Transcription de l'enregistrement…",
+        "live": "Direct",
+        "live_tip": "Transcription en direct : le texte apparaît pendant que vous parlez.",
+        "live_listening": "À l'écoute… parlez. Cliquez sur Arrêter quand c'est fini.",
+        "mic_label": "Microphone",
+        "mic_default": "Microphone par défaut",
+        "no_mic": "Aucun microphone détecté.",
+        "rec_error": "Erreur d'enregistrement :\n{err}",
     },
 }
 
@@ -398,6 +422,30 @@ QPushButton#corrButton {{
 }}
 QPushButton#corrButton:hover {{ border-color: {t.border_focus}; color: {t.text}; }}
 QPushButton#corrButton:disabled {{ color: {t.text_faint}; background-color: {t.surface_alt}; }}
+
+QComboBox#micCombo {{
+    background-color: {t.surface}; color: {t.text_dim};
+    border: 1px solid {t.border}; border-radius: 9px; padding: 8px 12px;
+}}
+QComboBox#micCombo:hover {{ border-color: {t.border_focus}; }}
+QComboBox#micCombo QAbstractItemView {{
+    background-color: {t.surface}; color: {t.text};
+    selection-background-color: {t.accent}; selection-color: {t.accent_text};
+    border: 1px solid {t.border}; padding: 4px;
+}}
+
+QPushButton#recButton, QPushButton#liveButton {{
+    background-color: {t.surface}; color: {t.text};
+    border: 1px solid {t.border}; border-radius: 9px;
+    padding: 8px 16px; font-size: 13px; font-weight: 600;
+}}
+QPushButton#recButton:hover, QPushButton#liveButton:hover {{ border-color: {t.border_focus}; }}
+QPushButton#recButton:disabled, QPushButton#liveButton:disabled {{
+    color: {t.text_faint}; background-color: {t.surface_alt};
+}}
+QPushButton#recButton[recording="true"], QPushButton#liveButton[recording="true"] {{
+    background-color: {t.danger}; border-color: {t.danger}; color: #ffffff;
+}}
 
 QDialog {{ background-color: {t.bg}; }}
 
@@ -868,6 +916,14 @@ class MainWindow(QMainWindow):
         self._last_status_key: tuple[str, dict] | None = None
         self._update_thread: QThread | None = None
         self._update_worker: UpdateChecker | None = None
+        # Enregistrement micro
+        self._rec_thread: QThread | None = None
+        self._rec_worker = None
+        self._recording = False
+        self._rec_seconds = 0
+        self._rec_timer: QTimer | None = None
+        self._live_process: QProcess | None = None
+        self._live_stdout = ""
 
         # Langue : anglais par défaut.
         lang = self._settings.value("lang", "en")
@@ -975,6 +1031,28 @@ class MainWindow(QMainWindow):
         self.drop.fileDropped.connect(self._on_file_selected)
         self.drop.clicked.connect(self._browse)
         root.addWidget(self.drop)
+
+        # Ligne enregistrement micro : sélecteur + Enregistrer + Direct
+        rec_row = QHBoxLayout()
+        rec_row.setSpacing(10)
+        self.mic_combo = QComboBox()
+        self.mic_combo.setObjectName("micCombo")
+        self.mic_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._populate_mics()
+        rec_row.addWidget(self.mic_combo, stretch=1)
+
+        self.record_btn = QPushButton("")
+        self.record_btn.setObjectName("recButton")
+        self.record_btn.setCursor(Qt.PointingHandCursor)
+        self.record_btn.clicked.connect(self._toggle_record)
+        rec_row.addWidget(self.record_btn)
+
+        self.live_btn = QPushButton("")
+        self.live_btn.setObjectName("liveButton")
+        self.live_btn.setCursor(Qt.PointingHandCursor)
+        self.live_btn.clicked.connect(self._toggle_live)
+        rec_row.addWidget(self.live_btn)
+        root.addLayout(rec_row)
 
         # Ligne fichier + qualité
         file_row = QHBoxLayout()
@@ -1097,6 +1175,16 @@ class MainWindow(QMainWindow):
         self.diarize_check.setText(self.tr("diarize"))
         self.diarize_check.setToolTip(self.tr("diarize_tip"))
 
+        # Enregistrement
+        if not self._recording:
+            self.record_btn.setText(self.tr("record"))
+        self.record_btn.setToolTip(self.tr("record_tip"))
+        if self._live_process is None:
+            self.live_btn.setText(self.tr("live"))
+        self.live_btn.setToolTip(self.tr("live_tip"))
+        if self.mic_combo.count() > 0:
+            self.mic_combo.setItemText(0, self.tr("mic_default"))
+
         # Boutons
         self.transcribe_btn.setText(self.tr("transcribe"))
         self.cancel_btn.setText(self.tr("cancel"))
@@ -1146,6 +1234,212 @@ class MainWindow(QMainWindow):
         dialog = CorrectionsDialog(self, self.tr, build_qss(self._theme))
         if dialog.exec() == QDialog.Accepted:
             self._set_status("corr_saved")
+
+    # ---- Enregistrement micro ---------------------------------------- #
+    def _populate_mics(self) -> None:
+        """Remplit le sélecteur de microphones."""
+        from audio_recorder import list_input_devices
+        self.mic_combo.clear()
+        self.mic_combo.addItem("", -1)  # défaut (libellé via _retranslate)
+        for idx, name in list_input_devices():
+            self.mic_combo.addItem(name, idx)
+
+    def _selected_mic(self) -> int | None:
+        data = self.mic_combo.currentData()
+        return None if data is None or data < 0 else int(data)
+
+    def _toggle_record(self) -> None:
+        """Mode « Enregistrer puis transcrire »."""
+        if self._recording:
+            self._stop_record()
+            return
+        # Vérifie qu'un micro existe.
+        from audio_recorder import has_microphone, MicRecorder
+        if not has_microphone():
+            QMessageBox.warning(self, self.tr("error"), self.tr("no_mic"))
+            return
+        if self._process is not None or self._live_process is not None:
+            return
+
+        self._recording = True
+        self._rec_seconds = 0
+        self.record_btn.setText(self.tr("record_stop"))
+        self.record_btn.setProperty("recording", True)
+        self._refresh_widget_style(self.record_btn)
+        self._set_recording_ui(True)
+        self._set_status("record_recording", sec=0)
+
+        # Compteur de secondes.
+        self._rec_timer = QTimer(self)
+        self._rec_timer.timeout.connect(self._tick_record)
+        self._rec_timer.start(1000)
+
+        # Thread d'enregistrement.
+        thread = QThread(self)
+        worker = MicRecorder(device=self._selected_mic())
+        worker.moveToThread(thread)
+        self._rec_thread = thread
+        self._rec_worker = worker
+        worker.finished.connect(self._on_record_finished)
+        worker.failed.connect(self._on_record_failed)
+        thread.started.connect(worker.run)
+        worker.done.connect(thread.quit)
+        worker.done.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_rec_thread_done)
+        thread.start()
+
+    def _tick_record(self) -> None:
+        self._rec_seconds += 1
+        self._set_status("record_recording", sec=self._rec_seconds)
+
+    def _stop_record(self) -> None:
+        if self._rec_timer:
+            self._rec_timer.stop()
+            self._rec_timer = None
+        if self._rec_worker:
+            self._rec_worker.stop()
+        self.record_btn.setText(self.tr("record"))
+        self.record_btn.setProperty("recording", False)
+        self._refresh_widget_style(self.record_btn)
+        self._recording = False
+
+    def _on_record_finished(self, wav_path: str) -> None:
+        # Enregistrement terminé : transcrit le WAV via le pipeline habituel.
+        self._set_recording_ui(False)
+        self._current_file = wav_path
+        self.file_label.setText(self.tr("record"))
+        self._set_status("record_transcribing")
+        self._start()  # lance la transcription du fichier
+
+    def _on_record_failed(self, err: str) -> None:
+        self._stop_record()
+        self._set_recording_ui(False)
+        QMessageBox.critical(self, self.tr("error"), self.tr("rec_error", err=err))
+        self._set_status("ready")
+
+    def _on_rec_thread_done(self) -> None:
+        self._rec_thread = None
+        self._rec_worker = None
+
+    # ---- Transcription EN DIRECT (streaming) ------------------------- #
+    def _toggle_live(self) -> None:
+        if self._live_process is not None:
+            self._stop_live()
+            return
+        from audio_recorder import has_microphone
+        if not has_microphone():
+            QMessageBox.warning(self, self.tr("error"), self.tr("no_mic"))
+            return
+        if self._process is not None or self._recording:
+            return
+
+        self._live_parts = []
+        self._live_stdout = ""
+        self.text_view.clear()
+        self.live_btn.setText(self.tr("record_stop"))
+        self.live_btn.setProperty("recording", True)
+        self._refresh_widget_style(self.live_btn)
+        self._set_recording_ui(True, live=True)
+        self._set_status("initializing")
+
+        model = self.quality_combo.currentData()
+        device = self._selected_mic()
+        dev_arg = str(device) if device is not None else "-1"
+        args_tail = [model, "fr", "int8", "5", dev_arg]
+        if getattr(sys, "frozen", False):
+            program, arguments = sys.executable, ["--run-stream", *args_tail]
+        else:
+            program = sys.executable
+            arguments = [str(APP_ROOT / "stream_worker.py"), *args_tail]
+
+        proc = QProcess(self)
+        proc.setProgram(program)
+        proc.setArguments(arguments)
+        proc.setWorkingDirectory(str(APP_ROOT))
+        proc.setProcessChannelMode(QProcess.SeparateChannels)
+        proc.readyReadStandardOutput.connect(self._on_live_stdout)
+        proc.finished.connect(self._on_live_finished)
+        self._live_process = proc
+        proc.start()
+
+    def _stop_live(self) -> None:
+        if self._live_process is not None:
+            # Envoie une ligne sur stdin pour un arrêt propre (finalise le dernier
+            # énoncé), puis termine.
+            try:
+                self._live_process.write(b"stop\n")
+                self._live_process.closeWriteChannel()
+            except Exception:  # noqa: BLE001
+                pass
+            QTimer.singleShot(2500, self._kill_live)
+
+    def _kill_live(self) -> None:
+        if self._live_process is not None:
+            self._live_process.kill()
+
+    def _on_live_stdout(self) -> None:
+        if self._live_process is None:
+            return
+        data = bytes(self._live_process.readAllStandardOutput()).decode("utf-8", "replace")
+        self._live_stdout += data
+        while "\n" in self._live_stdout:
+            line, self._live_stdout = self._live_stdout.split("\n", 1)
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                evt = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            etype = evt.get("type")
+            if etype == "phase":
+                key = evt.get("key", "")
+                if key == "listening":
+                    self._set_status("live_listening")
+                elif key in ("loading_model", "downloading_model"):
+                    self._set_status(key, **(evt.get("params") or {}))
+            elif etype == "segment":
+                self._live_parts.append(evt.get("text", ""))
+                self.text_view.setPlainText(" ".join(self._live_parts).strip())
+                sb = self.text_view.verticalScrollBar()
+                sb.setValue(sb.maximum())
+            elif etype == "failed":
+                QMessageBox.critical(self, self.tr("error"),
+                                     self.tr("transcribe_error", err=evt.get("message", "")))
+
+    def _on_live_finished(self, _code: int, _status) -> None:
+        self._set_recording_ui(False, live=True)
+        self.live_btn.setText(self.tr("live"))
+        self.live_btn.setProperty("recording", False)
+        self._refresh_widget_style(self.live_btn)
+        proc = self._live_process
+        self._live_process = None
+        if proc is not None:
+            proc.deleteLater()
+        text = self.text_view.toPlainText().strip()
+        self.copy_btn.setEnabled(bool(text))
+        self.save_btn.setEnabled(bool(text))
+        self._set_status("ready")
+
+    def _set_recording_ui(self, active: bool, live: bool = False) -> None:
+        """Désactive les autres contrôles pendant enregistrement/direct."""
+        self.drop.set_enabled_visual(not active)
+        self.transcribe_btn.setEnabled(not active and self._current_file is not None)
+        self.quality_combo.setEnabled(not active)
+        self.corrections_btn.setEnabled(not active)
+        self.diarize_check.setEnabled(not active)
+        self.mic_combo.setEnabled(not active)
+        # Pendant un enregistrement simple, on garde Live désactivé, et vice-versa.
+        if not live:
+            self.live_btn.setEnabled(not active)
+        else:
+            self.record_btn.setEnabled(not active)
+
+    @staticmethod
+    def _refresh_widget_style(widget) -> None:
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
 
     # ---- Vérification des mises à jour -------------------------------- #
     def _check_updates(self) -> None:
@@ -1430,10 +1724,19 @@ def _run_worker_mode() -> int:
     return worker_main()
 
 
+def _run_stream_mode() -> int:
+    """Mode « streaming » : worker de transcription en direct (exe figé)."""
+    from stream_worker import main as stream_main
+    sys.argv = [sys.argv[0]] + sys.argv[2:]
+    return stream_main()
+
+
 def main() -> int:
     # Point d'entrée « worker » (exe figé qui se relance pour transcrire).
     if len(sys.argv) > 1 and sys.argv[1] == "--run-worker":
         return _run_worker_mode()
+    if len(sys.argv) > 1 and sys.argv[1] == "--run-stream":
+        return _run_stream_mode()
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
