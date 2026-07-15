@@ -98,31 +98,37 @@ def main() -> int:
         device = int(sys.argv[5])
     except ValueError:
         device = -1
+    # 7e argument : chemin d'un fichier « signal d'arrêt ». Quand ce fichier
+    # apparaît, le worker finalise le dernier énoncé et s'arrête. Fiable même
+    # dans un exe fenêtré (où stdin est indisponible), contrairement à stdin.
+    stop_file = sys.argv[6] if len(sys.argv) > 6 else ""
     lang = None if language.lower() == "auto" else language
 
-    # Signal d'arrêt : un thread lit stdin ; toute ligne => on arrête proprement.
     stop_flag = {"stop": False}
 
-    def _watch_stdin() -> None:
-        try:
-            for _line in sys.stdin:
+    def _watch_stop() -> None:
+        # Surveille l'apparition du fichier d'arrêt (non bloquant, fiable même
+        # en exe fenêtré où stdin est indisponible).
+        while not stop_flag["stop"]:
+            if stop_file and os.path.exists(stop_file):
                 stop_flag["stop"] = True
-                break
-        except Exception:  # noqa: BLE001
-            pass
-        stop_flag["stop"] = True
+                return
+            time.sleep(0.15)
 
     try:
         import numpy as np
         import sounddevice as sd
         from transcriber_core import (
             Transcriber, TranscriptionOptions, load_corrections, apply_corrections,
+            _model_is_cached,
         )
 
         threads = os.cpu_count() or 4
         emit({"type": "phase", "key": "loading_model",
               "params": {"model": model_name, "compute": compute, "threads": threads}})
-        emit({"type": "phase", "key": "downloading_model", "params": {}})
+        # N'affiche « téléchargement » QUE si le modèle n'est pas déjà en cache.
+        if not _model_is_cached(model_name):
+            emit({"type": "phase", "key": "downloading_model", "params": {}})
 
         options = TranscriptionOptions(
             model_name=model_name, language=lang,
@@ -135,7 +141,7 @@ def main() -> int:
         emit({"type": "phase", "key": "listening", "params": {}})
 
         # Démarre la surveillance de stdin pour l'arrêt.
-        threading.Thread(target=_watch_stdin, daemon=True).start()
+        threading.Thread(target=_watch_stop, daemon=True).start()
 
         blocksize = int(SAMPLE_RATE * BLOCK_SEC)
         utterance = []             # blocs float32 de l'énoncé courant

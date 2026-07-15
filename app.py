@@ -1346,7 +1346,15 @@ class MainWindow(QMainWindow):
         model = self.quality_combo.currentData()
         device = self._selected_mic()
         dev_arg = str(device) if device is not None else "-1"
-        args_tail = [model, "fr", "int8", "5", dev_arg]
+
+        # Fichier « signal d'arrêt » : créé au clic sur Arrêter. Fiable même en
+        # exe fenêtré (contrairement à stdin qui y est indisponible).
+        import tempfile
+        fd, self._live_stop_file = tempfile.mkstemp(suffix="_stopsignal")
+        os.close(fd)
+        os.remove(self._live_stop_file)  # doit ne PAS exister au départ
+
+        args_tail = [model, "fr", "int8", "5", dev_arg, self._live_stop_file]
         if getattr(sys, "frozen", False):
             program, arguments = sys.executable, ["--run-stream", *args_tail]
         else:
@@ -1365,17 +1373,23 @@ class MainWindow(QMainWindow):
 
     def _stop_live(self) -> None:
         if self._live_process is not None:
-            # Envoie une ligne sur stdin pour un arrêt propre (finalise le dernier
-            # énoncé), puis termine.
+            self._set_status("record_transcribing")
+            self.live_btn.setEnabled(False)
+            # Crée le fichier d'arrêt : le worker finalise le dernier énoncé
+            # puis s'arrête proprement.
             try:
-                self._live_process.write(b"stop\n")
-                self._live_process.closeWriteChannel()
+                stop_file = getattr(self, "_live_stop_file", "")
+                if stop_file:
+                    with open(stop_file, "w", encoding="utf-8") as f:
+                        f.write("stop")
             except Exception:  # noqa: BLE001
                 pass
-            QTimer.singleShot(2500, self._kill_live)
+            # Filet de sécurité : si le worker ne s'arrête pas seul (mic bloqué),
+            # on le tue. Généreux pour ne pas couper la transcription finale.
+            QTimer.singleShot(20000, self._kill_live)
 
     def _kill_live(self) -> None:
-        if self._live_process is not None:
+        if self._live_process is not None and self._live_process.state() != QProcess.NotRunning:
             self._live_process.kill()
 
     def _on_live_stdout(self) -> None:
@@ -1410,6 +1424,7 @@ class MainWindow(QMainWindow):
 
     def _on_live_finished(self, _code: int, _status) -> None:
         self._set_recording_ui(False, live=True)
+        self.live_btn.setEnabled(True)
         self.live_btn.setText(self.tr("live"))
         self.live_btn.setProperty("recording", False)
         self._refresh_widget_style(self.live_btn)
@@ -1417,6 +1432,14 @@ class MainWindow(QMainWindow):
         self._live_process = None
         if proc is not None:
             proc.deleteLater()
+        # Nettoie le fichier d'arrêt.
+        stop_file = getattr(self, "_live_stop_file", "")
+        if stop_file and os.path.exists(stop_file):
+            try:
+                os.remove(stop_file)
+            except OSError:
+                pass
+        self._live_stop_file = ""
         text = self.text_view.toPlainText().strip()
         self.copy_btn.setEnabled(bool(text))
         self.save_btn.setEnabled(bool(text))
