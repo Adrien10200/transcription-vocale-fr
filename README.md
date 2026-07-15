@@ -35,6 +35,7 @@ A simple, modern desktop app powered by
 
 - 🎯 **High French accuracy** — `large-v3` model, beam search, temperature fallback, voice-activity detection (VAD).
 - 🖱 **Drag & drop** an audio/video file, or click to browse.
+- 🎙 **Record from your microphone** — *Record* (record then transcribe) or *Live* (text appears while you speak), with a device selector.
 - 🔒 **100% offline** — no data ever leaves your machine.
 - ⚡ **Fluid interface** — transcription runs in the background, text streams in live, and everything is **cancellable**.
 - 📋 **Copy / Save** the result in one click (`.txt` or `.srt` subtitles).
@@ -230,6 +231,7 @@ Application de bureau simple et moderne, propulsée par
 
 - 🎯 **Haute précision en français** — modèle `large-v3`, recherche par faisceau, repli sur la température, détection d'activité vocale (VAD).
 - 🖱 **Glisser-déposer** un fichier audio/vidéo, ou cliquer pour parcourir.
+- 🎙 **Enregistrement micro** — *Enregistrer* (puis transcrire) ou *Direct* (le texte apparaît pendant que vous parlez), avec sélecteur de périphérique.
 - 🔒 **100 % hors ligne** — aucune donnée ne quitte votre machine.
 - ⚡ **Interface fluide** — transcription en arrière-plan, texte affiché en direct, **annulable** à tout moment.
 - 📋 **Copier / Enregistrer** le résultat en un clic (`.txt` ou sous-titres `.srt`).
