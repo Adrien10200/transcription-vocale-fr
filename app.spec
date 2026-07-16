@@ -50,6 +50,8 @@ binaries += collect_dynamic_libs("sounddevice")   # PortAudio DLL
 
 # Données de sounddevice (_sounddevice_data avec la DLL PortAudio).
 datas += collect_data_files("sounddevice")
+# Données de soundcard (définitions cffi pour WASAPI loopback).
+datas += collect_data_files("soundcard")
 
 hiddenimports = [
     "faster_whisper",
@@ -58,6 +60,7 @@ hiddenimports = [
     "tokenizers",
     "av",
     "sounddevice",
+    "soundcard",
     "cffi",
     "_cffi_backend",
     "numpy",

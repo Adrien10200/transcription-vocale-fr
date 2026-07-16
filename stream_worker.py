@@ -94,8 +94,11 @@ def main() -> int:
         beam = int(sys.argv[4])
     except ValueError:
         beam = 5
+    # device : "loopback" (son du bureau) ou un index de micro (-1 = défaut).
+    device_arg = sys.argv[5]
+    loopback = device_arg == "loopback"
     try:
-        device = int(sys.argv[5])
+        device = int(device_arg)
     except ValueError:
         device = -1
     # 7e argument : chemin d'un fichier « signal d'arrêt ». Quand ce fichier
@@ -188,34 +191,47 @@ def main() -> int:
                 seg_index += 1
                 emit({"type": "segment", "index": seg_index, "text": text})
 
-        dev = None if device < 0 else device
-        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
-                            blocksize=blocksize, device=dev) as stream:
-            while not stop_flag["stop"]:
-                block, _overflowed = stream.read(blocksize)
-                mono = block[:, 0] if block.ndim > 1 else block
-                rms = float(np.sqrt(np.mean(mono**2))) if len(mono) else 0.0
-
-                if rms >= SILENCE_RMS:
-                    speaking = True
-                    silence_time = 0.0
+        def process_block(mono):
+            """Traite un bloc audio mono float32 : VAD + découpage sur silence."""
+            nonlocal utterance, speaking, silence_time
+            rms = float(np.sqrt(np.mean(mono**2))) if len(mono) else 0.0
+            if rms >= SILENCE_RMS:
+                speaking = True
+                silence_time = 0.0
+                utterance.append(mono.copy())
+            else:
+                if speaking:
                     utterance.append(mono.copy())
-                else:
-                    if speaking:
-                        utterance.append(mono.copy())
-                        silence_time += BLOCK_SEC
-                        if silence_time >= SILENCE_HANG_SEC:
-                            transcribe_utterance(utterance)
-                            utterance = []
-                            speaking = False
-                            silence_time = 0.0
+                    silence_time += BLOCK_SEC
+                    if silence_time >= SILENCE_HANG_SEC:
+                        transcribe_utterance(utterance)
+                        utterance = []
+                        speaking = False
+                        silence_time = 0.0
+            if speaking and len(utterance) * BLOCK_SEC >= MAX_UTTERANCE_SEC:
+                transcribe_utterance(utterance)
+                utterance = []
+                speaking = False
+                silence_time = 0.0
 
-                # Sécurité : énoncé trop long => on transcrit et on continue.
-                if speaking and len(utterance) * BLOCK_SEC >= MAX_UTTERANCE_SEC:
-                    transcribe_utterance(utterance)
-                    utterance = []
-                    speaking = False
-                    silence_time = 0.0
+        if loopback:
+            # Capture du son du bureau (sortie système) via WASAPI loopback.
+            import soundcard as sc
+            speaker = sc.default_speaker()
+            mic = sc.get_microphone(speaker.name, include_loopback=True)
+            with mic.recorder(samplerate=SAMPLE_RATE, channels=1) as rec:
+                while not stop_flag["stop"]:
+                    data = rec.record(numframes=blocksize)   # float32 mono
+                    mono = data[:, 0] if data.ndim > 1 else data
+                    process_block(mono.astype(np.float32))
+        else:
+            dev = None if device < 0 else device
+            with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
+                                blocksize=blocksize, device=dev) as stream:
+                while not stop_flag["stop"]:
+                    block, _overflowed = stream.read(blocksize)
+                    mono = block[:, 0] if block.ndim > 1 else block
+                    process_block(mono)
 
         # Arrêt demandé : finalise l'énoncé en cours.
         transcribe_utterance(utterance)

@@ -140,6 +140,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "live_listening": "Listening… speak now. Click Stop when done.",
         "mic_label": "Microphone",
         "mic_default": "Default microphone",
+        "desktop_sound": "🔊 Desktop sound (system audio)",
         "no_mic": "No microphone detected.",
         "rec_error": "Recording error:\n{err}",
     },
@@ -235,6 +236,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "live_listening": "À l'écoute… parlez. Cliquez sur Arrêter quand c'est fini.",
         "mic_label": "Microphone",
         "mic_default": "Microphone par défaut",
+        "desktop_sound": "🔊 Son du bureau (audio système)",
         "no_mic": "Aucun microphone détecté.",
         "rec_error": "Erreur d'enregistrement :\n{err}",
     },
@@ -1182,8 +1184,13 @@ class MainWindow(QMainWindow):
         if self._live_process is None:
             self.live_btn.setText(self.tr("live"))
         self.live_btn.setToolTip(self.tr("live_tip"))
-        if self.mic_combo.count() > 0:
-            self.mic_combo.setItemText(0, self.tr("mic_default"))
+        # Libellés des entrées audio spéciales (défaut + son du bureau).
+        for i in range(self.mic_combo.count()):
+            data = self.mic_combo.itemData(i)
+            if data == -1:
+                self.mic_combo.setItemText(i, self.tr("mic_default"))
+            elif data == "loopback":
+                self.mic_combo.setItemText(i, self.tr("desktop_sound"))
 
         # Boutons
         self.transcribe_btn.setText(self.tr("transcribe"))
@@ -1237,15 +1244,21 @@ class MainWindow(QMainWindow):
 
     # ---- Enregistrement micro ---------------------------------------- #
     def _populate_mics(self) -> None:
-        """Remplit le sélecteur de microphones."""
-        from audio_recorder import list_input_devices
+        """Remplit le sélecteur d'entrée audio (micros + son du bureau)."""
+        from audio_recorder import list_input_devices, has_desktop_audio
         self.mic_combo.clear()
-        self.mic_combo.addItem("", -1)  # défaut (libellé via _retranslate)
+        self.mic_combo.addItem("", -1)  # micro par défaut (libellé via _retranslate)
+        if has_desktop_audio():
+            # Option « Son du bureau » (capture la sortie système / loopback).
+            self.mic_combo.addItem("", "loopback")
         for idx, name in list_input_devices():
             self.mic_combo.addItem(name, idx)
 
-    def _selected_mic(self) -> int | None:
+    def _selected_mic(self):
+        """Retourne 'loopback' (son du bureau), un index de micro, ou None (défaut)."""
         data = self.mic_combo.currentData()
+        if data == "loopback":
+            return "loopback"
         return None if data is None or data < 0 else int(data)
 
     def _toggle_record(self) -> None:
@@ -1253,9 +1266,9 @@ class MainWindow(QMainWindow):
         if self._recording:
             self._stop_record()
             return
-        # Vérifie qu'un micro existe.
         from audio_recorder import has_microphone, MicRecorder
-        if not has_microphone():
+        # Loopback (son du bureau) ne nécessite pas de micro.
+        if self._selected_mic() != "loopback" and not has_microphone():
             QMessageBox.warning(self, self.tr("error"), self.tr("no_mic"))
             return
         if self._process is not None or self._live_process is not None:
@@ -1328,7 +1341,7 @@ class MainWindow(QMainWindow):
             self._stop_live()
             return
         from audio_recorder import has_microphone
-        if not has_microphone():
+        if self._selected_mic() != "loopback" and not has_microphone():
             QMessageBox.warning(self, self.tr("error"), self.tr("no_mic"))
             return
         if self._process is not None or self._recording:
