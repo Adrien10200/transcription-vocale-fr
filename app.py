@@ -1244,15 +1244,19 @@ class MainWindow(QMainWindow):
 
     # ---- Enregistrement micro ---------------------------------------- #
     def _populate_mics(self) -> None:
-        """Remplit le sélecteur d'entrée audio (micros + son du bureau)."""
-        from audio_recorder import list_input_devices, has_desktop_audio
+        """Remplit le sélecteur d'entrée audio.
+
+        Volontairement minimal : « Son du bureau » (tout le son de l'ordinateur)
+        et « Micro par défaut ». On n'énumère PAS chaque périphérique (les
+        cartes virtuelles type Voicemeeter noieraient la liste)."""
+        from audio_recorder import has_microphone
         self.mic_combo.clear()
-        self.mic_combo.addItem("", -1)  # micro par défaut (libellé via _retranslate)
-        if has_desktop_audio():
-            # Option « Son du bureau » (capture la sortie système / loopback).
+        # Son du bureau en premier (choix par défaut). Le loopback WASAPI est
+        # toujours disponible sous Windows 10/11 ; on ne sonde pas (peu fiable).
+        if sys.platform == "win32":
             self.mic_combo.addItem("", "loopback")
-        for idx, name in list_input_devices():
-            self.mic_combo.addItem(name, idx)
+        if has_microphone():
+            self.mic_combo.addItem("", -1)   # micro par défaut
 
     def _selected_mic(self):
         """Retourne 'loopback' (son du bureau), un index de micro, ou None (défaut)."""
