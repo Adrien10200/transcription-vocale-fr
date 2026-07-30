@@ -43,6 +43,10 @@ from version import __version__, RELEASES_API, RELEASES_PAGE
 
 APP_NAME = "Transcription Vocale FR"
 
+# Modèle utilisé pour la transcription EN DIRECT (streaming). Volontairement
+# petit et rapide pour tenir le temps réel sur CPU (large-v3 est trop lent).
+LIVE_MODEL = "small"
+
 
 # =========================================================================== #
 #  INTERNATIONALISATION (Anglais par défaut, Français en option)
@@ -1360,7 +1364,10 @@ class MainWindow(QMainWindow):
         self._set_recording_ui(True, live=True)
         self._set_status("initializing")
 
-        model = self.quality_combo.currentData()
+        # Le mode direct utilise TOUJOURS un petit modèle rapide (« small ») et
+        # un décodage greedy (beam=1) : large-v3 est bien trop lent pour le
+        # temps réel sur CPU. La transcription de fichiers garde large-v3.
+        model = LIVE_MODEL
         device = self._selected_mic()
         dev_arg = str(device) if device is not None else "-1"
 
@@ -1371,7 +1378,7 @@ class MainWindow(QMainWindow):
         os.close(fd)
         os.remove(self._live_stop_file)  # doit ne PAS exister au départ
 
-        args_tail = [model, "fr", "int8", "5", dev_arg, self._live_stop_file]
+        args_tail = [model, "fr", "int8", "1", dev_arg, self._live_stop_file]
         if getattr(sys, "frozen", False):
             program, arguments = sys.executable, ["--run-stream", *args_tail]
         else:
