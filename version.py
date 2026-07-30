@@ -6,7 +6,7 @@ Utilisée par :
   • l'installeur Inno Setup (via --DMyAppVersion en CI).
 """
 
-__version__ = "1.9.1"
+__version__ = "1.10.0"
 
 # Dépôt GitHub utilisé pour vérifier les nouvelles versions.
 GITHUB_OWNER = "Adrien10200"
