@@ -131,6 +131,45 @@ jobs:
             ${{ steps.installer.outputs.installer }}
           retention-days: 30
 
+      - name: Publier la release
+        if: github.ref_type == 'tag' || github.event.inputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: "Transcription Vocale FR ${{ steps.version.outputs.version }}"
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            ${{ steps.package.outputs.asset }}
+            ${{ steps.installer.outputs.installer }}
+          body: |
+            ## Transcription Vocale FR — ${{ steps.version.outputs.version }}
+
+            Application Windows de transcription vocale française
+            (haute précision, 100 % en local).
+
+            ### Installation (recommandé) — programme d'installation
+            1. Téléchargez **`TranscriptionVocaleFR-Setup-….exe`**.
+            2. Lancez-le (aucun droit administrateur requis).
+            3. Le modèle est mis en cache **hors** du dossier de l'app : les
+               futures mises à jour **ne re-téléchargent jamais** les ~3 Go.
+
+            ### Version portable (ZIP)
+            1. Téléchargez le `.zip`, décompressez-le où vous voulez.
+            2. Lancez **`Transcription Vocale FR.exe`**.
+
+            > Au premier lancement, le modèle `large-v3` (~3 Go) est téléchargé
+            > automatiquement puis mis en cache. Les lancements suivants sont
+            > immédiats.
+
+            ### Accélération GPU AMD (optionnel)
+            L'archive **`…-win64-gpu-amd.zip`** embarque le moteur ROCm : elle
+            utilise la carte graphique sur Radeon **RX 7000** (RDNA3) et APU
+            Strix (RDNA3.5), sans rien installer de plus. Bien plus rapide, mais
+            plus lourde à télécharger. En cas de doute, prenez la version CPU
+            ci-dessus, qui fonctionne partout.
+
   # ------------------------------------------------------------------ #
   # Variante GPU AMD (ROCm). Build séparée, publiée en plus de la build
   # CPU : elle embarque le moteur ROCm et ne concerne que les Radeon
@@ -242,41 +281,12 @@ jobs:
           path: ${{ steps.package.outputs.asset }}
           retention-days: 30
 
+      # La variante GPU s'AJOUTE à la release créée par le job « build ».
+      # Ce job ne définit ni le titre ni le corps : il ne fait qu'attacher son
+      # archive, pour ne pas écraser ce que l'autre job a publié.
       - name: Ajouter la variante GPU à la release
         if: github.ref_type == 'tag' || github.event.inputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.version }}
           files: ${{ steps.package.outputs.asset }}
-
-      - name: Publier la release
-        if: github.ref_type == 'tag' || github.event.inputs.tag != ''
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.version.outputs.version }}
-          name: "Transcription Vocale FR ${{ steps.version.outputs.version }}"
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-          files: |
-            ${{ steps.package.outputs.asset }}
-            ${{ steps.installer.outputs.installer }}
-          body: |
-            ## Transcription Vocale FR — ${{ steps.version.outputs.version }}
-
-            Application Windows de transcription vocale française
-            (haute précision, 100 % en local).
-
-            ### Installation (recommandé) — programme d'installation
-            1. Téléchargez **`TranscriptionVocaleFR-Setup-….exe`**.
-            2. Lancez-le (aucun droit administrateur requis).
-            3. Le modèle est mis en cache **hors** du dossier de l'app : les
-               futures mises à jour **ne re-téléchargent jamais** les ~3 Go.
-
-            ### Version portable (ZIP)
-            1. Téléchargez le `.zip`, décompressez-le où vous voulez.
-            2. Lancez **`Transcription Vocale FR.exe`**.
-
-            > Au premier lancement, le modèle `large-v3` (~3 Go) est téléchargé
-            > automatiquement puis mis en cache. Les lancements suivants sont
-            > immédiats.
