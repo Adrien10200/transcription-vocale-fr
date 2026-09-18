@@ -73,14 +73,14 @@ def main() -> int:
         # Imports lourds ici pour que le kill reste réactif au démarrage.
         import os
         from transcriber_core import (
-            Transcriber, TranscriptionOptions, _model_is_cached,
+            Transcriber, TranscriptionOptions, model_is_available,
         )
 
         threads = os.cpu_count() or 4
         emit({"type": "phase", "key": "loading_model",
               "params": {"model": model_name, "compute": compute, "threads": threads}})
         # N'affiche « téléchargement » QUE si le modèle n'est pas déjà en cache.
-        if not _model_is_cached(model_name):
+        if not model_is_available(model_name):
             emit({"type": "phase", "key": "downloading_model", "params": {}})
 
         options = TranscriptionOptions(

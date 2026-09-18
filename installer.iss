@@ -16,6 +16,17 @@
 #define MyAppPublisher "Adrien10200"
 #define MyAppURL "https://github.com/Adrien10200/transcription-vocale-fr"
 
+; Variante GPU AMD : compiler avec /DGpuVariant=1. Le contenu installé provient
+; du même dossier `dist` — c'est la build PyInstaller qui diffère (moteur ROCm
+; embarqué). Seul le nom du fichier de sortie change : l'AppId reste identique,
+; si bien qu'installer une variante REMPLACE l'autre au lieu de cohabiter, et
+; qu'une seule entrée apparaît dans « Applications installées ».
+#ifdef GpuVariant
+  #define VariantSuffix "-gpu-amd"
+#else
+  #define VariantSuffix ""
+#endif
+
 [Setup]
 AppId={{B3F1C2A4-7E9D-4B2A-9C3E-TRANSCRIPTIONFR}}
 AppName={#MyAppName}
@@ -33,7 +44,7 @@ DefaultGroupName={#MyAppName}
 
 ; Le cache modèle est HORS du dossier d'installation : jamais touché aux MAJ.
 UninstallDisplayIcon={app}\{#MyAppExeName}
-OutputBaseFilename=TranscriptionVocaleFR-Setup-{#MyAppVersion}
+OutputBaseFilename=TranscriptionVocaleFR-Setup-{#MyAppVersion}{#VariantSuffix}
 OutputDir=installer_output
 Compression=lzma2/max
 SolidCompression=yes

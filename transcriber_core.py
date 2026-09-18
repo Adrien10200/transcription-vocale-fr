@@ -199,6 +199,102 @@ def enable_offline_if_cached(model_name: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Modèles affinés pour le français.
+#
+# `large-v3` est multilingue : il connaît ~100 langues, au prix d'une précision
+# moindre sur chacune. Des versions réentraînées sur du français seul font
+# nettement mieux sur cette langue, et sont publiées au format CTranslate2 —
+# directement exploitables par faster-whisper.
+#
+# Particularité : ces dépôts rangent les fichiers CTranslate2 dans un
+# SOUS-DOSSIER (`ctranslate2/`), que faster-whisper ne sait pas cibler. On
+# télécharge donc ce sous-dossier nous-mêmes, puis on donne le chemin local.
+#
+# WER publiés (plus bas = mieux), après normalisation :
+#
+#   Jeu de test              large-v3-fr   large-v3-fr-distil
+#   Common Voice 13.0            7.28            7.18
+#   Multilingual LibriSpeech     3.98            3.57
+#   VoxPopuli                    8.91            8.76
+#   Fleurs                       4.84            5.03
+#   Français accentué (Afrique)  4.20            3.90
+#
+# La version distillée gagne sur 4 jeux sur 5 tout en étant plus rapide
+# (16 couches de décodeur au lieu de 32) et en hallucinant moins sur les
+# enregistrements longs : c'est le meilleur compromis par défaut.
+# --------------------------------------------------------------------------- #
+EXTRA_MODELS: dict[str, tuple[str, str]] = {
+    "large-v3-fr": ("bofenghuang/whisper-large-v3-french", "ctranslate2"),
+    "large-v3-fr-distil": (
+        "bofenghuang/whisper-large-v3-french-distil-dec16", "ctranslate2",
+    ),
+}
+
+
+def _extra_model_dir(model_name: str) -> Path:
+    return MODEL_CACHE / "custom" / model_name
+
+
+def extra_model_is_cached(model_name: str) -> bool:
+    """Vrai si un modèle affiné est déjà téléchargé et complet."""
+    repo_subdir = EXTRA_MODELS.get(model_name)
+    if not repo_subdir:
+        return False
+    model_bin = _extra_model_dir(model_name) / repo_subdir[1] / "model.bin"
+    try:
+        return model_bin.is_file() and model_bin.stat().st_size >= _MIN_MODEL_BIN_BYTES
+    except OSError:
+        return False
+
+
+def ensure_extra_model(
+    model_name: str,
+    log: Callable[[str], None] | None = None,
+) -> str:
+    """Garantit la présence locale d'un modèle affiné ; renvoie son chemin.
+
+    Ne télécharge que le sous-dossier CTranslate2 : inutile de rapatrier les
+    poids PyTorch, GGML et autres formats publiés dans le même dépôt.
+    """
+    repo, subdir = EXTRA_MODELS[model_name]
+    target = _extra_model_dir(model_name)
+    ct2_dir = target / subdir
+
+    if extra_model_is_cached(model_name):
+        return str(ct2_dir)
+
+    # Un chargement précédent a pu activer le mode hors-ligne de HuggingFace ;
+    # il empêcherait ce téléchargement.
+    os.environ.pop("HF_HUB_OFFLINE", None)
+    os.environ.pop("TRANSFORMERS_OFFLINE", None)
+
+    if log:
+        log(f"Téléchargement du modèle français « {model_name} » "
+            f"depuis {repo} (une seule fois)…")
+
+    from huggingface_hub import snapshot_download
+
+    target.mkdir(parents=True, exist_ok=True)
+    snapshot_download(
+        repo_id=repo,
+        local_dir=str(target),
+        allow_patterns=f"{subdir}/*",
+    )
+    if not (ct2_dir / "model.bin").is_file():
+        raise RuntimeError(
+            f"Téléchargement incomplet : {ct2_dir / 'model.bin'} est absent."
+        )
+    return str(ct2_dir)
+
+
+def model_is_available(model_name: str) -> bool:
+    """Vrai si le modèle (standard ou affiné) est déjà présent localement."""
+    if model_name in EXTRA_MODELS:
+        return extra_model_is_cached(model_name)
+    return _model_is_cached(model_name)
+
+
+# --------------------------------------------------------------------------- #
 # Corrections de vocabulaire (dictionnaire personnalisé, persistant).
 #
 # L'utilisateur peut définir des remplacements du type « Volio » -> « Voelio ».
@@ -270,6 +366,35 @@ def save_corrections(corrections: list[dict]) -> None:
         )
     except OSError:
         pass
+
+
+def corrections_hotwords(corrections: list[dict] | None = None,
+                         max_chars: int = 240) -> str:
+    """Construit une amorce de vocabulaire à partir des corrections.
+
+    On ne retient que les graphies CORRECTES (le champ « to ») : ce sont elles
+    qu'on veut voir sortir du décodeur. faster-whisper insère ces mots dans
+    l'amorce du décodeur, ce qui biaise la reconnaissance en leur faveur — le
+    nom propre est alors transcrit juste du premier coup, au lieu d'être
+    remplacé après coup dans le texte.
+
+    La longueur est bornée : l'amorce est tronquée à la moitié de la fenêtre de
+    contexte du modèle, et la saturer nuirait à la transcription elle-même.
+    """
+    if corrections is None:
+        corrections = load_corrections()
+    seen: list[str] = []
+    for corr in corrections or []:
+        word = str(corr.get("to", "")).strip()
+        if word and word not in seen:
+            seen.append(word)
+    out = ""
+    for word in seen:
+        candidate = f"{out} {word}".strip()
+        if len(candidate) > max_chars:
+            break
+        out = candidate
+    return out
 
 
 def apply_corrections(text: str, corrections: list[dict] | None = None) -> str:
@@ -518,6 +643,34 @@ def rocm_runtime_present() -> bool:
         return False
 
 
+def gpu_bundle_present() -> bool:
+    """Vrai si CETTE build embarque le runtime ROCm (variante « GPU »).
+
+    Contrairement à `rocm_runtime_present`, la détection ne suppose PAS que
+    ctranslate2 ait été importé : l'interface graphique ne l'importe jamais (ce
+    sont les workers qui le font). On cherche donc le dossier ROCm sur le
+    disque, à l'emplacement où PyInstaller le dépose (`_internal`) ou, en mode
+    script, dans le site-packages de l'environnement.
+
+    Sert à proposer la bonne archive lors d'une mise à jour : un utilisateur de
+    la variante GPU ne doit pas se retrouver silencieusement sur la build CPU.
+    """
+    for base in (RESOURCE_ROOT, APP_ROOT):
+        try:
+            if (Path(base) / "_rocm_sdk_core").is_dir():
+                return True
+        except Exception:
+            pass
+    try:
+        import sysconfig
+        purelib = sysconfig.get_paths().get("purelib")
+        if purelib and (Path(purelib) / "_rocm_sdk_core").is_dir():
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def safe_exit(code: int = 0) -> int:
     """Termine le processus SANS exécuter les destructeurs natifs.
 
@@ -584,6 +737,19 @@ class TranscriptionOptions:
     make_srt: bool = False
     diarize: bool = False                # identifier les interlocuteurs
 
+    # Réinjecter le texte déjà transcrit comme contexte du segment suivant.
+    # Aide à la cohérence sur un audio court et propre, MAIS c'est la cause
+    # documentée n°1 des hallucinations sur les enregistrements longs : un
+    # segment erroné contamine le contexte de tous les suivants, d'où des
+    # boucles de répétition ou des dérives de sujet. faster-whisper le force
+    # d'ailleurs à False dans son pipeline par lots. Désactivé par défaut.
+    condition_on_previous_text: bool = False
+
+    # Injecter le vocabulaire personnalisé (corrections) dans l'amorce du
+    # décodeur, pour que les noms propres soient reconnus DÈS le décodage au
+    # lieu d'être rattrapés après coup par un remplacement de texte.
+    use_hotwords: bool = True
+
 
 @dataclass
 class Segment:
@@ -592,6 +758,19 @@ class Segment:
     end: float
     text: str
     speaker: int | None = None           # numéro d'interlocuteur (1, 2…) si diarisation
+
+    # Indicateurs de qualité renvoyés par le décodeur. `compression_ratio` est
+    # le signal le plus fiable pour repérer une hallucination : un texte qui se
+    # répète se compresse très bien, au-delà de 2.4 il est suspect.
+    # `avg_logprob` mesure la confiance moyenne (en dessous de -1.0 : douteux).
+    avg_logprob: float = 0.0
+    compression_ratio: float = 0.0
+    no_speech_prob: float = 0.0
+
+    @property
+    def suspicious(self) -> bool:
+        """Vrai si le segment présente les marqueurs d'une hallucination."""
+        return self.compression_ratio > 2.4 or self.avg_logprob < -1.0
 
 
 @dataclass
@@ -663,9 +842,17 @@ class Transcriber:
 
         self._retire_model(log)
 
-        # Si le modèle est déjà en cache : mode hors-ligne => AUCUN appel réseau,
-        # donc aucun risque de re-téléchargement. Sinon : téléchargement autorisé.
-        cached = enable_offline_if_cached(options.model_name)
+        # Modèle affiné (français) : on récupère le sous-dossier CTranslate2 et
+        # on passe un CHEMIN LOCAL à faster-whisper, qui ne sait pas viser un
+        # sous-dossier de dépôt. Sinon : comportement historique par nom.
+        if options.model_name in EXTRA_MODELS:
+            model_id = ensure_extra_model(options.model_name, log)
+            cached = True          # chemin local => aucun appel réseau ensuite
+        else:
+            # Si le modèle est déjà en cache : mode hors-ligne => AUCUN appel
+            # réseau, donc aucun risque de re-téléchargement.
+            cached = enable_offline_if_cached(options.model_name)
+            model_id = options.model_name
 
         if log:
             log(f"Chargement du modèle « {options.model_name} » "
@@ -677,7 +864,7 @@ class Transcriber:
         t0 = time.time()
         try:
             self._model = self._build(
-                WhisperModel, options, device, compute_type, threads, cached,
+                WhisperModel, model_id, device, compute_type, threads, cached,
             )
             self._device = device
             if device == DEVICE_GPU:
@@ -699,7 +886,7 @@ class Transcriber:
                 log(f"GPU indisponible ({type(exc).__name__}: {exc}). "
                     f"Retour au CPU (compute={fallback_compute}).")
             self._model = self._build(
-                WhisperModel, options, DEVICE_CPU, fallback_compute, threads, cached,
+                WhisperModel, model_id, DEVICE_CPU, fallback_compute, threads, cached,
             )
             self._device = DEVICE_CPU
             if rocm_runtime_present():
@@ -714,13 +901,17 @@ class Transcriber:
     @staticmethod
     def _build(
         model_cls,
-        options: TranscriptionOptions,
+        model_id: str,
         device: str,
         compute_type: str,
         threads: int,
         cached: bool,
     ):
-        """Instancie WhisperModel pour un périphérique donné."""
+        """Instancie WhisperModel pour un périphérique donné.
+
+        `model_id` est soit un nom standard (« large-v3 »), soit le chemin d'un
+        dossier CTranslate2 local pour les modèles affinés.
+        """
         kwargs = dict(
             compute_type=compute_type,
             download_root=str(MODEL_CACHE),
@@ -729,7 +920,7 @@ class Transcriber:
         if device == DEVICE_CPU:
             # `cpu_threads` n'a de sens que sur CPU.
             kwargs["cpu_threads"] = threads
-        return model_cls(options.model_name, device=device, **kwargs)
+        return model_cls(model_id, device=device, **kwargs)
 
     def transcribe(
         self,
@@ -747,6 +938,13 @@ class Transcriber:
         audio_path = str(audio_path)
         t0 = time.time()
 
+        # Corrections de vocabulaire (chargées une seule fois, réutilisées plus
+        # bas pour le remplacement de texte).
+        corrections = load_corrections()
+        hotwords = corrections_hotwords(corrections) if options.use_hotwords else ""
+        if hotwords and log:
+            log(f"Vocabulaire guidé : {hotwords}")
+
         segments_gen, info = self._model.transcribe(
             audio_path,
             language=options.language,
@@ -758,8 +956,9 @@ class Transcriber:
             compression_ratio_threshold=2.4,
             log_prob_threshold=-1.0,
             no_speech_threshold=0.6,
-            condition_on_previous_text=True,
+            condition_on_previous_text=options.condition_on_previous_text,
             initial_prompt=options.initial_prompt,
+            hotwords=hotwords or None,
             word_timestamps=options.make_srt,
             vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=400),
@@ -771,9 +970,6 @@ class Transcriber:
             log(f"Langue : {info.language} (prob. {info.language_probability:.2f}) "
                 f"— durée {info.duration:.1f}s")
 
-        # Corrections de vocabulaire personnalisées (chargées une seule fois).
-        corrections = load_corrections()
-
         segments: list[Segment] = []
         srt_chunks: list[str] = []
 
@@ -782,8 +978,15 @@ class Transcriber:
                 raise TranscriptionCancelled()
             clean = seg.text.strip()
             if corrections:
+                # Les hotwords guident le décodeur mais ne garantissent rien :
+                # on conserve le remplacement de texte en filet de sécurité.
                 clean = apply_corrections(clean, corrections)
-            s = Segment(index=i, start=seg.start, end=seg.end, text=clean)
+            s = Segment(
+                index=i, start=seg.start, end=seg.end, text=clean,
+                avg_logprob=getattr(seg, "avg_logprob", 0.0) or 0.0,
+                compression_ratio=getattr(seg, "compression_ratio", 0.0) or 0.0,
+                no_speech_prob=getattr(seg, "no_speech_prob", 0.0) or 0.0,
+            )
             segments.append(s)
             if on_segment:
                 on_segment(s)

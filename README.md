@@ -96,14 +96,48 @@ from the top-right corner.
 
 The app is tuned for **maximum quality**, not speed:
 
-| Setting                       | Effect |
-|-------------------------------|--------|
-| `large-v3` model              | The most accurate of the Whisper family. |
-| Forced language `fr`          | Avoids language-detection errors. |
-| `beam_size = 8`               | Wide beam search → safer decoding. |
-| Temperature fallback          | Retries on repetitive/incoherent output. |
-| **VAD** filter (Silero)       | Strips silences → fewer hallucinations. |
-| `condition_on_previous_text`  | Keeps context between segments. |
+| Setting                              | Effect |
+|--------------------------------------|--------|
+| `large-v3` model                     | The most accurate of the Whisper family. |
+| Forced language `fr`                 | Avoids language-detection errors. |
+| `beam_size = 8`                      | Wide beam search → safer decoding. |
+| Temperature fallback                 | Retries on repetitive/incoherent output. |
+| **VAD** filter (Silero)              | Strips silences → fewer hallucinations. |
+| `condition_on_previous_text = False` | Each segment decoded independently. |
+| Vocabulary as **hotwords**           | Your custom words bias the decoder itself. |
+
+### French-specialised models
+
+`large-v3` is multilingual — it covers ~100 languages, which costs accuracy on
+each one. The **Compute quality** dropdown also offers models retrained on
+French only, which are measurably better at it. Published WER (lower is better):
+
+| Test set                  | `large-v3-fr` | `large-v3-fr-distil` |
+|---------------------------|-------------|--------------------|
+| Common Voice 13.0         | 7.28        | **7.18**               |
+| Multilingual LibriSpeech  | 3.98        | **3.57**               |
+| VoxPopuli                 | 8.91        | **8.76**               |
+| Fleurs                    | **4.84**        | 5.03               |
+| African-accented French   | 4.20        | **3.90**               |
+
+The *distilled* variant wins on four of five sets while also being faster
+(16 decoder layers instead of 32) and hallucinating less on long recordings —
+hence "recommended". Both are extra downloads (~2.2 GB) on first use, and are
+**French-only**: feeding them another language degrades output noticeably.
+
+### Two things that changed for accuracy
+
+**`condition_on_previous_text` is now off.** Re-injecting already-transcribed
+text as context helps consistency on short, clean audio, but it is the
+documented leading cause of hallucination on long recordings: one wrong segment
+poisons the context of every following one, producing repetition loops or topic
+drift. faster-whisper's own batched pipeline hard-codes it off.
+
+**Your vocabulary corrections now also act as `hotwords`.** They used to be a
+plain find-and-replace applied *after* transcription. The correct spellings are
+now injected into the decoder prompt as well, so a proper noun is transcribed
+right the first time instead of being patched afterwards. The find-and-replace
+is still applied as a safety net.
 
 By default, inference runs on **CPU** in `int8` (the sweet spot between accuracy
 and memory). This is the case for every installed copy of the app: the bundled

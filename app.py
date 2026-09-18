@@ -40,7 +40,7 @@ from transcriber_core import (
     is_media_file, MEDIA_EXTS, APP_ROOT, RESOURCE_ROOT,
     load_corrections, save_corrections,
     DEVICE_AUTO, DEVICE_CPU, DEVICE_GPU, ENV_DEVICE,
-    gpu_is_available, describe_gpu,
+    gpu_is_available, describe_gpu, gpu_bundle_present,
 )
 from version import __version__, RELEASES_API, RELEASES_PAGE
 
@@ -69,8 +69,13 @@ STRINGS: dict[str, dict[str, str]] = {
         "drop_sub": "or click to browse  ·  MP3, WAV, M4A, MP4…",
         "no_file": "No file selected",
         "quality_max": "Best quality (large-v3)",
+        "quality_fr_distil": "French, specialised (recommended)",
+        "quality_fr_full": "French, specialised (full)",
         "quality_fast": "Fast (medium)",
-        "quality_tip": "large-v3 = best accuracy. medium = faster.",
+        "quality_tip": "large-v3 = multilingual, best all-round accuracy.\n"
+                       "French models are fine-tuned on French only and are "
+                       "more accurate for it (extra download on first use).\n"
+                       "medium = faster, less accurate.",
         "device": "Compute",
         "device_auto": "Automatic",
         "device_cpu": "CPU",
@@ -174,8 +179,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "drop_sub": "ou cliquez pour parcourir  ·  MP3, WAV, M4A, MP4…",
         "no_file": "Aucun fichier sélectionné",
         "quality_max": "Qualité max (large-v3)",
+        "quality_fr_distil": "Français, spécialisé (recommandé)",
+        "quality_fr_full": "Français, spécialisé (complet)",
         "quality_fast": "Rapide (medium)",
-        "quality_tip": "large-v3 = meilleure précision. medium = plus rapide.",
+        "quality_tip": "large-v3 = multilingue, bonne précision générale.\n"
+                       "Les modèles français sont réentraînés sur le français "
+                       "seul et y sont plus précis (téléchargement "
+                       "supplémentaire à la première utilisation).\n"
+                       "medium = plus rapide, moins précis.",
         "device": "Calcul",
         "device_auto": "Automatique",
         "device_cpu": "Processeur (CPU)",
@@ -748,13 +759,28 @@ class UpdateChecker(QObject):
                 data = json.loads(resp.read().decode("utf-8"))
             tag = str(data.get("tag_name", "")).strip()
 
-            # Cherche l'asset installeur (…Setup….exe) parmi les fichiers.
-            installer_url = ""
+            # Cherche l'installeur (…Setup….exe) CORRESPONDANT à la variante en
+            # cours d'exécution. Une release publie deux installeurs : la build
+            # CPU et la build GPU (ROCm embarqué). Prendre le premier venu ferait
+            # silencieusement basculer un utilisateur GPU sur la build CPU, lui
+            # retirant l'accélération sans qu'il s'en rende compte.
+            setups = []
             for asset in data.get("assets", []):
                 name = str(asset.get("name", "")).lower()
                 if name.endswith(".exe") and "setup" in name:
-                    installer_url = str(asset.get("browser_download_url", ""))
-                    break
+                    setups.append((name, str(asset.get("browser_download_url", ""))))
+
+            wants_gpu = gpu_bundle_present()
+            gpu_setups = [u for n, u in setups if "gpu" in n]
+            cpu_setups = [u for n, u in setups if "gpu" not in n]
+
+            if wants_gpu:
+                # Aucun installeur GPU dans cette release : on n'offre PAS la
+                # mise à jour automatique plutôt que de rétrograder vers le CPU.
+                installer_url = gpu_setups[0] if gpu_setups else ""
+            else:
+                installer_url = cpu_setups[0] if cpu_setups else ""
+
             self.result.emit(tag, installer_url)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
@@ -1111,7 +1137,13 @@ class MainWindow(QMainWindow):
         file_row.addWidget(self.corrections_btn)
 
         self.quality_combo = QComboBox()
-        self.quality_combo.addItem("", "large-v3")   # libellés via _retranslate
+        # Libellés posés par _retranslate. « large-v3 » reste en premier (donc
+        # par défaut) : c'est le modèle déjà en cache chez les utilisateurs
+        # existants. Les variantes françaises sont plus précises mais demandent
+        # un téléchargement supplémentaire, on ne l'impose donc pas.
+        self.quality_combo.addItem("", "large-v3")
+        self.quality_combo.addItem("", "large-v3-fr-distil")
+        self.quality_combo.addItem("", "large-v3-fr")
         self.quality_combo.addItem("", "medium")
         file_row.addWidget(self.quality_combo)
         root.addLayout(file_row)
@@ -1226,8 +1258,17 @@ class MainWindow(QMainWindow):
             self.file_label.setText(Path(self._current_file).name)
         else:
             self.file_label.setText(self.tr("no_file"))
-        self.quality_combo.setItemText(0, self.tr("quality_max"))
-        self.quality_combo.setItemText(1, self.tr("quality_fast"))
+        # Indexé par la donnée et non par la position : ajouter un modèle ne
+        # risque plus de décaler les libellés.
+        quality_labels = {
+            "large-v3": self.tr("quality_max"),
+            "large-v3-fr-distil": self.tr("quality_fr_distil"),
+            "large-v3-fr": self.tr("quality_fr_full"),
+            "medium": self.tr("quality_fast"),
+        }
+        for i in range(self.quality_combo.count()):
+            key = self.quality_combo.itemData(i)
+            self.quality_combo.setItemText(i, quality_labels.get(key, key))
         self.quality_combo.setToolTip(self.tr("quality_tip"))
         self.corrections_btn.setText(self.tr("corrections"))
         self.corrections_btn.setToolTip(self.tr("corrections_tip"))

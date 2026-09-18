@@ -109,7 +109,10 @@ jobs:
         run: |
           $ver = "${{ steps.version.outputs.version }}".TrimStart('v')
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=$ver installer.iss
-          $setup = Get-ChildItem "installer_output\*.exe" | Select-Object -First 1
+          # Exclut explicitement la variante GPU : les deux installeurs portent
+          # l'extension .exe et « -gpu-amd » passe AVANT par ordre alphabétique.
+          $setup = Get-ChildItem "installer_output\*.exe" |
+                   Where-Object { $_.Name -notmatch 'gpu' } | Select-Object -First 1
           if (-not $setup) { throw "Installeur introuvable après compilation" }
           Write-Host "Installeur créé : $($setup.Name)"
           "installer=$($setup.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -261,6 +264,28 @@ jobs:
           }
           "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
+      - name: Signer l'exe (certificat auto-signé)
+        id: sign
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $cert = New-SelfSignedCertificate `
+            -Type CodeSigningCert `
+            -Subject "CN=Adrien10200, O=Adrien10200, C=FR" `
+            -KeyUsage DigitalSignature `
+            -FriendlyName "Transcription Vocale FR (self-signed)" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -HashAlgorithm SHA256 `
+            -KeyExportPolicy Exportable
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+                      Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw "signtool introuvable" }
+          & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint `
+            /tr http://timestamp.digicert.com /td SHA256 `
+            "dist\Transcription Vocale FR\Transcription Vocale FR.exe"
+          "THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SIGNTOOL=$($signtool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Archiver la variante GPU (ZIP)
         id: package
         shell: pwsh
@@ -274,11 +299,40 @@ jobs:
           }
           "asset=$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Téléverser l'artefact GPU
+      - name: Installer Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Construire l'installeur GPU (Inno Setup)
+        id: installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ver = "${{ steps.version.outputs.version }}".TrimStart('v')
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            /DMyAppVersion=$ver /DGpuVariant=1 installer.iss
+          $setup = Get-ChildItem "installer_output\*gpu-amd*.exe" | Select-Object -First 1
+          if (-not $setup) { throw "Installeur GPU introuvable après compilation" }
+          $mb = [math]::Round($setup.Length / 1MB)
+          Write-Host "Installeur GPU créé : $($setup.Name) ($mb Mo)"
+          if ($setup.Length -ge 2GB) {
+            throw "Installeur >= 2 Go : au-delà de la limite d'un asset GitHub"
+          }
+          "installer=$($setup.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Signer l'installeur GPU
+        shell: pwsh
+        run: |
+          & "$env:SIGNTOOL" sign /fd SHA256 /sha1 "$env:THUMBPRINT" `
+            /tr http://timestamp.digicert.com /td SHA256 `
+            "${{ steps.installer.outputs.installer }}"
+
+      - name: Téléverser les artefacts GPU
         uses: actions/upload-artifact@v4
         with:
           name: application-windows-gpu-amd
-          path: ${{ steps.package.outputs.asset }}
+          path: |
+            ${{ steps.package.outputs.asset }}
+            ${{ steps.installer.outputs.installer }}
           retention-days: 30
 
       # La variante GPU s'AJOUTE à la release créée par le job « build ».
@@ -289,4 +343,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.version }}
-          files: ${{ steps.package.outputs.asset }}
+          files: |
+            ${{ steps.package.outputs.asset }}
+            ${{ steps.installer.outputs.installer }}
