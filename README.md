@@ -159,8 +159,33 @@ python -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())"
 
 Known limitation: on RDNA3 (gfx1100) the CTranslate2 model destructor can
 deadlock ([CTranslate2#2038](https://github.com/OpenNMT/CTranslate2/issues/2038)).
-The app works around it by keeping a retired model alive, so changing model or
-compute type mid-session leaves the previous one in VRAM until restart.
+The app works around it twice over: a retired model is kept alive rather than
+destroyed (so changing model or compute type mid-session leaves the previous one
+in VRAM until restart), and the worker processes short-circuit interpreter
+shutdown, because the deadlock also triggers when a process exits.
+
+#### Shrinking the ROCm payload
+
+A stock ROCm install weighs **3718 MB**, but almost all of it is either build
+tooling or kernels for other GPUs. Measured on gfx1100, the following can be
+deleted while inference keeps working — **619 MB remain, 171 MB zipped**:
+
+| Removed                                     | Saved   |
+| ------------------------------------------- | ------- |
+| `_rocm_sdk_core/lib/llvm` (compiler toolchain) | 1606 MB |
+| `MIOpen.dll` (convolutions, unused)           | 468 MB  |
+| `rocrand.dll` / `hiprand.dll`                    | 226 MB  |
+| `rocsparse.dll` / `hipsparse.dll`                | 79 MB   |
+| `rocfft.dll` / `hipfft.dll` / `hipfftw.dll`         | 18 MB   |
+| rocBLAS Tensile kernels, non-gfx1100        | 88 MB   |
+| hipBLASLt kernels, non-gfx1100              | 614 MB  |
+
+Keep `rocsolver.dll`/`hipsolver.dll` and `libhipblaslt.dll` — despite appearances
+both are link-time dependencies of `ctranslate2.dll` and their removal stops it
+from loading at all.
+
+Pruning this way makes the install **single-architecture**: swapping to a
+different GPU family means reinstalling the wheels.
 
 </details>
 
