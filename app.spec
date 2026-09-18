@@ -53,6 +53,32 @@ datas += collect_data_files("sounddevice")
 # Données de soundcard (définitions cffi pour WASAPI loopback).
 datas += collect_data_files("soundcard")
 
+# --- Variante GPU (optionnelle) ------------------------------------------- #
+# Si TVFR_GPU_BUNDLE désigne un site-packages contenant une installation ROCm
+# (préalablement allégée par packaging/prune_rocm.py), son arborescence est
+# embarquée telle quelle.
+#
+# La disposition RELATIVE est critique : ctranslate2/__init__.py appelle
+# os.add_dll_directory("<dossier du paquet>/../_rocm_sdk_core/bin") — les
+# dossiers ROCm doivent donc être frères du paquet ctranslate2 dans le bundle.
+# On passe par `datas` (et non `binaries`) pour que PyInstaller copie les
+# fichiers sans analyser ni déplacer ces DLL.
+GPU_BUNDLE = os.environ.get("TVFR_GPU_BUNDLE", "").strip()
+if GPU_BUNDLE:
+    gpu_root = os.path.abspath(GPU_BUNDLE)
+    _gpu_files = 0
+    for pkg in ("_rocm_sdk_core", "_rocm_sdk_libraries_custom"):
+        pkg_root = os.path.join(gpu_root, pkg)
+        if not os.path.isdir(pkg_root):
+            raise SystemExit(f"TVFR_GPU_BUNDLE : {pkg} introuvable dans {gpu_root}")
+        for dirpath, _dirnames, filenames in os.walk(pkg_root):
+            rel_dir = os.path.relpath(dirpath, gpu_root)
+            for fn in filenames:
+                datas.append((os.path.join(dirpath, fn), rel_dir))
+                _gpu_files += 1
+    print(f"[app.spec] variante GPU : {_gpu_files} fichiers ROCm embarqués "
+          f"depuis {gpu_root}")
+
 hiddenimports = [
     "faster_whisper",
     "ctranslate2",
@@ -128,6 +154,11 @@ _DROP_DIR_HINTS = (
 
 def _keep(dest_name: str) -> bool:
     low = dest_name.lower()
+    # Les fichiers ROCm de la variante GPU sont déjà filtrés par
+    # packaging/prune_rocm.py : ils échappent aux motifs génériques ci-dessous,
+    # qui pourraient sinon en écarter par coïncidence de nom.
+    if low.startswith("_rocm_sdk"):
+        return True
     if any(pat in low for pat in _DROP_PATTERNS):
         return False
     if any(hint in low for hint in _DROP_DIR_HINTS):

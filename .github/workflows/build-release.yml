@@ -131,6 +131,124 @@ jobs:
             ${{ steps.installer.outputs.installer }}
           retention-days: 30
 
+  # ------------------------------------------------------------------ #
+  # Variante GPU AMD (ROCm). Build séparée, publiée en plus de la build
+  # CPU : elle embarque le moteur ROCm et ne concerne que les Radeon
+  # RDNA3 / RDNA3.5. La build CPU ci-dessus reste la version par défaut.
+  # ------------------------------------------------------------------ #
+  build-gpu-amd:
+    runs-on: windows-latest
+
+    env:
+      ROCM_REL: "7.2.1"
+      CT2_VERSION: "4.7.1"
+      # RDNA3 (RX 7000) + RDNA3.5 (APU Strix). RDNA4 exclu : +542 Mo de
+      # noyaux et CTranslate2 4.7.1 y est signalé instable (#2021).
+      GFX_TARGETS: "gfx1100,gfx1101,gfx1102,gfx1150,gfx1151"
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Installer Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Installer les dépendances
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt
+
+      - name: Installer le runtime ROCm
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $base = "https://repo.radeon.com/rocm/windows/rocm-rel-$env:ROCM_REL"
+          pip install --no-cache-dir --no-deps `
+            "$base/rocm_sdk_core-$env:ROCM_REL-py3-none-win_amd64.whl" `
+            "$base/rocm_sdk_libraries_custom-$env:ROCM_REL-py3-none-win_amd64.whl" `
+            "$base/rocm-$env:ROCM_REL.tar.gz"
+
+      - name: Installer CTranslate2 (build ROCm)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = "v$env:CT2_VERSION"
+          gh release download $tag --repo OpenNMT/CTranslate2 `
+            --pattern "rocm-python-wheels-Windows.zip" --dir ct2 --clobber
+          Expand-Archive -Path "ct2\rocm-python-wheels-Windows.zip" -DestinationPath ct2\x -Force
+          $py = "cp311"
+          $whl = Get-ChildItem -Recurse ct2\x -Filter "ctranslate2-$env:CT2_VERSION-$py-$py-win_amd64.whl" |
+                 Select-Object -First 1
+          if (-not $whl) { throw "Roue ROCm $py introuvable dans l'archive" }
+          # Remplace la roue CUDA de PyPI par la roue ROCm.
+          pip install --no-cache-dir --force-reinstall --no-deps $whl.FullName
+          python -c "import ctranslate2; print('CTranslate2', ctranslate2.__version__)"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Alléger ROCm (retrait de l'outillage et des autres GPU)
+        shell: pwsh
+        run: |
+          $sp = python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])"
+          python packaging/prune_rocm.py --site-packages "$sp" --targets "$env:GFX_TARGETS"
+
+      - name: Compiler l'exécutable (PyInstaller, variante GPU)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:TVFR_GPU_BUNDLE = python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])"
+          python -m PyInstaller --noconfirm --clean app.spec
+          $exe = "dist\Transcription Vocale FR\Transcription Vocale FR.exe"
+          if (-not (Test-Path $exe)) { throw "Exécutable introuvable après build" }
+          # Vérifie que ROCm a bien atterri à l'emplacement attendu par
+          # ctranslate2 (frère du paquet, sinon add_dll_directory échoue).
+          $rocm = "dist\Transcription Vocale FR\_internal\_rocm_sdk_core\bin"
+          if (-not (Test-Path $rocm)) { throw "ROCm absent du bundle : $rocm" }
+          Write-Host "ROCm embarqué OK."
+
+      - name: Déterminer le nom de version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $v = "${{ github.ref_name }}"
+          } elseif ("${{ github.event.inputs.tag }}" -ne "") {
+            $v = "${{ github.event.inputs.tag }}"
+          } else {
+            $v = "dev-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+          }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Archiver la variante GPU (ZIP)
+        id: package
+        shell: pwsh
+        run: |
+          $name = "Transcription-Vocale-FR-${{ steps.version.outputs.version }}-win64-gpu-amd.zip"
+          Compress-Archive -Path "dist/Transcription Vocale FR/*" -DestinationPath $name -Force
+          $mb = [math]::Round((Get-Item $name).Length / 1MB)
+          Write-Host "Archive GPU créée : $name ($mb Mo)"
+          if ((Get-Item $name).Length -ge 2GB) {
+            throw "Archive >= 2 Go : au-delà de la limite d'un asset GitHub"
+          }
+          "asset=$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Téléverser l'artefact GPU
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-windows-gpu-amd
+          path: ${{ steps.package.outputs.asset }}
+          retention-days: 30
+
+      - name: Ajouter la variante GPU à la release
+        if: github.ref_type == 'tag' || github.event.inputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          files: ${{ steps.package.outputs.asset }}
+
       - name: Publier la release
         if: github.ref_type == 'tag' || github.event.inputs.tag != ''
         uses: softprops/action-gh-release@v2

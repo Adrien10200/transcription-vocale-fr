@@ -486,6 +486,38 @@ def gpu_in_use() -> bool:
     return _gpu_in_use
 
 
+# Références fortes gardées au niveau du module. Un modèle détenu par une
+# variable LOCALE est détruit dès que la fonction se termine : les workers
+# créaient leur Transcriber dans main(), dont le retour déclenchait le
+# destructeur bloquant AVANT même que safe_exit ne soit atteint. Épingler le
+# modèle ici le rend indestructible jusqu'à l'arrêt brutal du processus.
+_pinned_models: list = []
+
+
+def _pin_model(model) -> None:
+    """Rend un modèle indestructible (contournement CTranslate2 #2038)."""
+    if model is not None:
+        _pinned_models.append(model)
+
+
+def rocm_runtime_present() -> bool:
+    """Vrai si la DLL CTranslate2 chargée est celle liée à ROCm.
+
+    On teste la présence du runtime ROCm à côté du paquet ctranslate2, là où
+    `ctranslate2/__init__.py` va le chercher (os.add_dll_directory). C'est vrai
+    dans la variante GPU et dans un environnement de développement GPU, faux
+    dans la build CPU standard — qui garde donc un arrêt normal.
+    """
+    module = sys.modules.get("ctranslate2")
+    path = getattr(module, "__file__", None) if module else None
+    if not path:
+        return False
+    try:
+        return (Path(path).resolve().parent.parent / "_rocm_sdk_core").is_dir()
+    except Exception:
+        return False
+
+
 def safe_exit(code: int = 0) -> int:
     """Termine le processus SANS exécuter les destructeurs natifs.
 
@@ -496,11 +528,18 @@ def safe_exit(code: int = 0) -> int:
     Transcriber._retire_model) suffit pendant la vie du processus, mais PAS à
     l'arrêt : l'interpréteur détruit alors tous les objets restants et se figerait.
 
+    ATTENTION : le blocage ne dépend PAS de l'utilisation réelle du GPU.
+    `ctranslate2/__init__.py` charge `ctranslate2.dll` — liée à hipBLAS, rocBLAS
+    et rocSOLVER — dès l'import, ce qui initialise le runtime ROCm même pour un
+    calcul sur CPU. Mesuré : dans la variante GPU, un travail lancé en mode CPU
+    terminait sa transcription puis restait figé indéfiniment à l'arrêt. La
+    condition porte donc sur le runtime chargé, pas sur le périphérique utilisé.
+
     Comme les workers sont des processus jetables (un travail, puis sortie), on
     court-circuite l'arrêt propre avec os._exit après avoir vidé les tampons.
-    Sans GPU, on ne change rien : la valeur est simplement renvoyée.
+    Dans la build CPU standard, rien ne change : la valeur est simplement renvoyée.
     """
-    if not _gpu_in_use:
+    if not (_gpu_in_use or rocm_runtime_present()):
         return code
     try:
         sys.stdout.flush()
@@ -644,6 +683,10 @@ class Transcriber:
             if device == DEVICE_GPU:
                 global _gpu_in_use
                 _gpu_in_use = True
+            # Le runtime ROCm se bloque à la destruction, même après un calcul
+            # sur CPU : on épingle dès qu'il est présent, pas seulement sur GPU.
+            if device == DEVICE_GPU or rocm_runtime_present():
+                _pin_model(self._model)
         except Exception as exc:
             # Le GPU peut échouer pour de multiples raisons (roue CUDA installée
             # sur une machine AMD, runtime ROCm incomplet, VRAM insuffisante,
@@ -659,6 +702,8 @@ class Transcriber:
                 WhisperModel, options, DEVICE_CPU, fallback_compute, threads, cached,
             )
             self._device = DEVICE_CPU
+            if rocm_runtime_present():
+                _pin_model(self._model)
             compute_type = fallback_compute
             key = (options.model_name, compute_type, threads, DEVICE_CPU)
 
