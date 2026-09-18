@@ -77,23 +77,44 @@ def _collect_inputs(target: Path) -> list[Path]:
     return []
 
 
-def _build_model(model_name: str, compute_type: str, cpu_threads: int):
-    """Charge le modèle Whisper (téléchargement automatique au premier lancement)."""
-    from faster_whisper import WhisperModel
+def _build_model(model_name: str, compute_type: str, cpu_threads: int,
+                 device: str = "auto"):
+    """Charge le modèle Whisper (téléchargement automatique au premier lancement).
 
-    _eprint(f"[*] Chargement du modèle « {model_name} » (compute={compute_type}, "
-            f"threads={cpu_threads})…")
+    `device` accepte "auto", "cpu" ou "cuda". Rappel : CTranslate2 nomme "cuda"
+    aussi bien les GPU NVIDIA que les GPU AMD (ROCm/HIP). En cas d'échec sur
+    GPU, on retombe automatiquement sur le CPU plutôt que d'abandonner.
+    """
+    from faster_whisper import WhisperModel
+    from transcriber_core import (
+        DEVICE_CPU, DEVICE_GPU, detect_device, resolve_compute_type,
+    )
+
+    resolved = detect_device(device)
+    compute = resolve_compute_type(resolved, None if compute_type == "auto" else compute_type)
+
+    def _make(dev: str, comp: str):
+        kwargs = dict(compute_type=comp, download_root=str(_MODEL_CACHE))
+        if dev == DEVICE_CPU:
+            kwargs["cpu_threads"] = cpu_threads
+        return WhisperModel(model_name, device=dev, **kwargs)
+
+    _eprint(f"[*] Chargement du modèle « {model_name} » (device={resolved}, "
+            f"compute={compute}, threads={cpu_threads})…")
     _eprint("    Premier lancement : téléchargement du modèle (~3 Go pour large-v3). "
             "Cela peut prendre plusieurs minutes.")
     t0 = time.time()
-    model = WhisperModel(
-        model_name,
-        device="cpu",
-        compute_type=compute_type,
-        cpu_threads=cpu_threads,
-        download_root=str(_MODEL_CACHE),
-    )
-    _eprint(f"[*] Modèle prêt en {time.time() - t0:.1f}s.")
+    try:
+        model = _make(resolved, compute)
+    except Exception as exc:  # noqa: BLE001
+        if resolved != DEVICE_GPU:
+            raise
+        fallback = resolve_compute_type(DEVICE_CPU, None)
+        _eprint(f"[!] GPU indisponible ({type(exc).__name__}: {exc}). "
+                f"Retour au CPU (compute={fallback}).")
+        resolved, compute = DEVICE_CPU, fallback
+        model = _make(DEVICE_CPU, fallback)
+    _eprint(f"[*] Modèle prêt en {time.time() - t0:.1f}s ({resolved}).")
     return model
 
 
@@ -204,10 +225,18 @@ def main() -> int:
         help="Langue forcée (défaut : fr). Mettre 'auto' pour la détection automatique.",
     )
     parser.add_argument(
-        "--compute-type", default="int8",
-        choices=["int8", "int8_float32", "float32"],
-        help="Type de calcul CPU. int8 = rapide/économe (défaut). "
-             "float32 = un poil plus précis mais bien plus lent et gourmand en RAM.",
+        "--compute-type", default="auto",
+        choices=["auto", "int8", "int8_float32", "float32", "float16", "bfloat16"],
+        help="Type de calcul. 'auto' (défaut) = int8 sur CPU, float16 sur GPU. "
+             "float32 = un poil plus précis mais bien plus lent et gourmand en RAM. "
+             "float16/bfloat16 nécessitent un GPU.",
+    )
+    parser.add_argument(
+        "--device", default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help="Périphérique de calcul. 'auto' (défaut) = GPU s'il est détecté, "
+             "sinon CPU. 'cuda' désigne aussi bien un GPU NVIDIA (CUDA) qu'un "
+             "GPU AMD (ROCm) : CTranslate2 emploie le même nom pour les deux.",
     )
     parser.add_argument(
         "--beam-size", type=int, default=8,
@@ -247,7 +276,7 @@ def main() -> int:
         return 2
 
     try:
-        model = _build_model(args.model, args.compute_type, threads)
+        model = _build_model(args.model, args.compute_type, threads, args.device)
     except Exception as exc:  # noqa: BLE001
         _eprint(f"[!] Échec du chargement du modèle : {exc}")
         return 3

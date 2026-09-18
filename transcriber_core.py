@@ -387,11 +387,126 @@ def format_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
+# --------------------------------------------------------------------------- #
+# Choix du backend de calcul (CPU / GPU).
+#
+# CTranslate2 — le moteur de faster-whisper — expose les GPU NVIDIA (CUDA) ET
+# AMD (ROCm/HIP, depuis CTranslate2 4.7.1) sous le MÊME nom de périphérique :
+# "cuda". Il n'existe pas de valeur "rocm" ; sur une Radeon on passe donc bien
+# device="cuda". La distinction se fait au moment de l'installation de la roue
+# CTranslate2 (roue CUDA par défaut sur PyPI, roue ROCm à installer à la main).
+#
+# Le GPU n'est JAMAIS imposé : `detect_device()` ne renvoie "cuda" que si le
+# moteur voit réellement un périphérique, et le chargement du modèle retombe
+# automatiquement sur le CPU en cas d'échec (voir Transcriber.load).
+# --------------------------------------------------------------------------- #
+DEVICE_AUTO = "auto"
+DEVICE_CPU = "cpu"
+DEVICE_GPU = "cuda"          # CUDA (NVIDIA) *et* ROCm/HIP (AMD)
+
+# Type de calcul conseillé par périphérique.
+#   - CPU : int8 (seul choix réellement rapide sans AVX-512/AMX).
+#   - GPU : float16 — plus PRÉCIS que int8 et largement plus rapide ; large-v3
+#     tient dans ~3–4 Go de VRAM, donc sans risque sur une carte ≥ 8 Go.
+DEFAULT_COMPUTE_BY_DEVICE = {
+    DEVICE_CPU: "int8",
+    DEVICE_GPU: "float16",
+}
+
+
+def gpu_device_count() -> int:
+    """Nombre de GPU visibles par CTranslate2 (CUDA ou ROCm). 0 si aucun."""
+    try:
+        import ctranslate2
+    except Exception:
+        return 0
+    try:
+        return int(ctranslate2.get_cuda_device_count())
+    except Exception:
+        # Roue CPU-only, pilote absent, runtime ROCm/CUDA incomplet…
+        return 0
+
+
+def gpu_is_available() -> bool:
+    return gpu_device_count() > 0
+
+
+def detect_device(preference: str = DEVICE_AUTO) -> str:
+    """Résout une préférence utilisateur en périphérique concret.
+
+    "auto" => GPU s'il est réellement disponible, sinon CPU.
+    """
+    if preference == DEVICE_CPU:
+        return DEVICE_CPU
+    if preference == DEVICE_GPU:
+        # Choix explicite : on respecte la demande. Si le GPU est en fait
+        # inutilisable, Transcriber.load bascule sur le CPU avec un message.
+        return DEVICE_GPU
+    return DEVICE_GPU if gpu_is_available() else DEVICE_CPU
+
+
+def resolve_compute_type(device: str, compute_type: str | None) -> str:
+    """Complète un type de calcul non renseigné ("auto"/None) selon le device.
+
+    Évite le piège classique : garder int8 après être passé sur GPU, ce qui
+    perd en précision sans gagner en vitesse.
+    """
+    if compute_type and compute_type != DEVICE_AUTO:
+        return compute_type
+    return DEFAULT_COMPUTE_BY_DEVICE.get(device, "int8")
+
+
+def describe_gpu() -> str:
+    """Libellé lisible du backend GPU, pour les journaux et l'interface."""
+    count = gpu_device_count()
+    if count <= 0:
+        return "aucun GPU détecté par CTranslate2"
+    try:
+        import ctranslate2
+        types = sorted(ctranslate2.get_supported_compute_types(DEVICE_GPU))
+    except Exception:
+        types = []
+    suffix = f" — types: {', '.join(types)}" if types else ""
+    return f"{count} GPU détecté(s){suffix}"
+
+
+# Variables d'environnement : le GPU reste une option explicite, activable sans
+# toucher au code ni à l'installeur (qui continue d'embarquer la roue CPU).
+#   TVFR_DEVICE  = auto | cpu | cuda
+#   TVFR_COMPUTE = int8 | float16 | bfloat16 | float32 | …
+ENV_DEVICE = "TVFR_DEVICE"
+ENV_COMPUTE = "TVFR_COMPUTE"
+
+
+def resolve_backend(options: "TranscriptionOptions") -> tuple[str, str]:
+    """Détermine (device, compute_type) effectifs pour un jeu d'options.
+
+    Ordre de priorité : variable d'environnement > champ de `options` > auto.
+
+    Note : les workers (fichier / dictée) transmettent historiquement
+    `compute_type="int8"`, valeur pensée pour le CPU. Si le calcul bascule sur
+    GPU sans consigne explicite, on repasse sur le type conseillé (float16) :
+    sur GPU, int8 serait à la fois moins précis et sans gain de vitesse.
+    """
+    device_pref = os.environ.get(ENV_DEVICE) or options.device or DEVICE_AUTO
+    device = detect_device(device_pref.strip().lower())
+
+    env_compute = os.environ.get(ENV_COMPUTE)
+    if env_compute:
+        return device, env_compute.strip().lower()
+
+    if device == DEVICE_GPU and options.compute_type == DEFAULT_COMPUTE_BY_DEVICE[DEVICE_CPU]:
+        return device, DEFAULT_COMPUTE_BY_DEVICE[DEVICE_GPU]
+
+    return device, resolve_compute_type(device, options.compute_type)
+
+
 @dataclass
 class TranscriptionOptions:
     model_name: str = "large-v3"
     language: str | None = "fr"          # None => détection automatique
     compute_type: str = "int8"
+    device: str = DEVICE_AUTO            # "auto" | "cpu" | "cuda" (CUDA ou ROCm)
     beam_size: int = 8
     cpu_threads: int = 0                 # 0 => auto
     initial_prompt: str | None = None
@@ -425,10 +540,41 @@ class Transcriber:
     def __init__(self) -> None:
         self._model = None
         self._loaded_key: tuple | None = None
+        self._device: str = DEVICE_CPU
+        # Modèles GPU « retirés » mais volontairement NON libérés — voir
+        # _retire_model() et le contournement du blocage CTranslate2 #2038.
+        self._retired: list = []
 
     @staticmethod
     def _resolve_threads(threads: int) -> int:
         return threads if threads and threads > 0 else (os.cpu_count() or 4)
+
+    @property
+    def device(self) -> str:
+        """Périphérique réellement utilisé par le modèle chargé."""
+        return self._device
+
+    def _retire_model(self, log: Callable[[str], None] | None = None) -> None:
+        """Se sépare du modèle courant SANS déclencher son destructeur sur GPU.
+
+        Contournement de https://github.com/OpenNMT/CTranslate2/issues/2038 :
+        sur gfx1100 (RX 7900 XT/XTX) sous Windows + ROCm, la destruction d'un
+        modèle CTranslate2 se bloque indéfiniment dans la libération mémoire
+        HIP. Or un simple réassignement de `self._model` suffit à déclencher ce
+        destructeur. On conserve donc une référence vive : la VRAM du modèle
+        précédent reste occupée jusqu'à la fin du processus, mais l'application
+        ne se fige pas. Sur CPU, aucun problème : on libère normalement.
+        """
+        if self._model is None:
+            return
+        if self._device == DEVICE_GPU:
+            self._retired.append(self._model)
+            if log:
+                log("Changement de configuration sur GPU : le modèle précédent "
+                    "reste en VRAM jusqu'au redémarrage (contournement "
+                    "CTranslate2 #2038).")
+        self._model = None
+        self._loaded_key = None
 
     def load(
         self,
@@ -439,9 +585,12 @@ class Transcriber:
         from faster_whisper import WhisperModel
 
         threads = self._resolve_threads(options.cpu_threads)
-        key = (options.model_name, options.compute_type, threads)
+        device, compute_type = resolve_backend(options)
+        key = (options.model_name, compute_type, threads, device)
         if self._model is not None and key == self._loaded_key:
             return
+
+        self._retire_model(log)
 
         # Si le modèle est déjà en cache : mode hors-ligne => AUCUN appel réseau,
         # donc aucun risque de re-téléchargement. Sinon : téléchargement autorisé.
@@ -449,23 +598,58 @@ class Transcriber:
 
         if log:
             log(f"Chargement du modèle « {options.model_name} » "
-                f"(compute={options.compute_type}, threads={threads})…")
+                f"(device={device}, compute={compute_type}, threads={threads})…")
             if not cached:
                 log("Premier lancement : le modèle est téléchargé (~3 Go). "
                     "Cela peut prendre plusieurs minutes.")
 
         t0 = time.time()
-        self._model = WhisperModel(
-            options.model_name,
-            device="cpu",
-            compute_type=options.compute_type,
-            cpu_threads=threads,
+        try:
+            self._model = self._build(
+                WhisperModel, options, device, compute_type, threads, cached,
+            )
+            self._device = device
+        except Exception as exc:
+            # Le GPU peut échouer pour de multiples raisons (roue CUDA installée
+            # sur une machine AMD, runtime ROCm incomplet, VRAM insuffisante,
+            # type de calcul non supporté…). Dans tous ces cas, on ne casse pas
+            # l'application : on revient au CPU, qui fonctionne partout.
+            if device != DEVICE_GPU:
+                raise
+            fallback_compute = resolve_compute_type(DEVICE_CPU, None)
+            if log:
+                log(f"GPU indisponible ({type(exc).__name__}: {exc}). "
+                    f"Retour au CPU (compute={fallback_compute}).")
+            self._model = self._build(
+                WhisperModel, options, DEVICE_CPU, fallback_compute, threads, cached,
+            )
+            self._device = DEVICE_CPU
+            compute_type = fallback_compute
+            key = (options.model_name, compute_type, threads, DEVICE_CPU)
+
+        self._loaded_key = key
+        if log:
+            log(f"Modèle prêt en {time.time() - t0:.1f}s ({self._device}).")
+
+    @staticmethod
+    def _build(
+        model_cls,
+        options: TranscriptionOptions,
+        device: str,
+        compute_type: str,
+        threads: int,
+        cached: bool,
+    ):
+        """Instancie WhisperModel pour un périphérique donné."""
+        kwargs = dict(
+            compute_type=compute_type,
             download_root=str(MODEL_CACHE),
             local_files_only=cached,
         )
-        self._loaded_key = key
-        if log:
-            log(f"Modèle prêt en {time.time() - t0:.1f}s.")
+        if device == DEVICE_CPU:
+            # `cpu_threads` n'a de sens que sur CPU.
+            kwargs["cpu_threads"] = threads
+        return model_cls(options.model_name, device=device, **kwargs)
 
     def transcribe(
         self,
