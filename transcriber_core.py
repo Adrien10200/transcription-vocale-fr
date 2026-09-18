@@ -477,6 +477,38 @@ def describe_gpu() -> str:
 ENV_DEVICE = "TVFR_DEVICE"
 ENV_COMPUTE = "TVFR_COMPUTE"
 
+# Vrai dès qu'un modèle a été chargé sur GPU dans ce processus.
+_gpu_in_use = False
+
+
+def gpu_in_use() -> bool:
+    """Vrai si un modèle GPU est vivant dans ce processus."""
+    return _gpu_in_use
+
+
+def safe_exit(code: int = 0) -> int:
+    """Termine le processus SANS exécuter les destructeurs natifs.
+
+    Seconde moitié du contournement de
+    https://github.com/OpenNMT/CTranslate2/issues/2038 : sur gfx1100 (RX 7900
+    XT/XTX) sous Windows + ROCm, détruire un modèle CTranslate2 se bloque
+    indéfiniment dans la libération mémoire HIP. Retenir le modèle (voir
+    Transcriber._retire_model) suffit pendant la vie du processus, mais PAS à
+    l'arrêt : l'interpréteur détruit alors tous les objets restants et se figerait.
+
+    Comme les workers sont des processus jetables (un travail, puis sortie), on
+    court-circuite l'arrêt propre avec os._exit après avoir vidé les tampons.
+    Sans GPU, on ne change rien : la valeur est simplement renvoyée.
+    """
+    if not _gpu_in_use:
+        return code
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(code)
+
 
 def resolve_backend(options: "TranscriptionOptions") -> tuple[str, str]:
     """Détermine (device, compute_type) effectifs pour un jeu d'options.
@@ -609,6 +641,9 @@ class Transcriber:
                 WhisperModel, options, device, compute_type, threads, cached,
             )
             self._device = device
+            if device == DEVICE_GPU:
+                global _gpu_in_use
+                _gpu_in_use = True
         except Exception as exc:
             # Le GPU peut échouer pour de multiples raisons (roue CUDA installée
             # sur une machine AMD, runtime ROCm incomplet, VRAM insuffisante,

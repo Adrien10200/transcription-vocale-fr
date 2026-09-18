@@ -22,7 +22,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QProcess, QSettings, QThread, QObject, QTimer
+from PySide6.QtCore import (
+    Qt, Signal, QProcess, QProcessEnvironment, QSettings, QThread, QObject, QTimer,
+)
 from PySide6.QtGui import (
     QGuiApplication, QIcon, QPixmap, QPainter, QColor, QPen, QDesktopServices,
 )
@@ -37,6 +39,8 @@ from PySide6.QtWidgets import (
 from transcriber_core import (
     is_media_file, MEDIA_EXTS, APP_ROOT, RESOURCE_ROOT,
     load_corrections, save_corrections,
+    DEVICE_AUTO, DEVICE_CPU, DEVICE_GPU, ENV_DEVICE,
+    gpu_is_available, describe_gpu,
 )
 from version import __version__, RELEASES_API, RELEASES_PAGE
 
@@ -67,6 +71,15 @@ STRINGS: dict[str, dict[str, str]] = {
         "quality_max": "Best quality (large-v3)",
         "quality_fast": "Fast (medium)",
         "quality_tip": "large-v3 = best accuracy. medium = faster.",
+        "device": "Compute",
+        "device_auto": "Automatic",
+        "device_cpu": "CPU",
+        "device_gpu": "GPU",
+        "device_tip_gpu": "GPU is much faster and more precise (float16). "
+                          "Detected: {info}",
+        "device_tip_none": "No compatible GPU detected — running on CPU. "
+                           "GPU support requires installing a GPU build of the "
+                           "engine (see the README).",
         "transcribe": "Transcribe",
         "cancel": "Cancel",
         "section_text": "Transcribed text",
@@ -163,6 +176,15 @@ STRINGS: dict[str, dict[str, str]] = {
         "quality_max": "Qualité max (large-v3)",
         "quality_fast": "Rapide (medium)",
         "quality_tip": "large-v3 = meilleure précision. medium = plus rapide.",
+        "device": "Calcul",
+        "device_auto": "Automatique",
+        "device_cpu": "Processeur (CPU)",
+        "device_gpu": "Carte graphique (GPU)",
+        "device_tip_gpu": "Le GPU est bien plus rapide et plus précis (float16). "
+                          "Détecté : {info}",
+        "device_tip_none": "Aucun GPU compatible détecté — calcul sur le "
+                           "processeur. Le GPU nécessite d'installer une version "
+                           "GPU du moteur (voir le README).",
         "transcribe": "Transcrire",
         "cancel": "Annuler",
         "section_text": "Texte transcrit",
@@ -940,6 +962,20 @@ class MainWindow(QMainWindow):
             theme_key = "dark"
         self._theme = THEMES[theme_key]
 
+        # Périphérique de calcul : "auto" par défaut. Le GPU n'est proposé que
+        # si le moteur en voit réellement un (roue GPU installée par l'utilisateur).
+        device_key = self._settings.value("device", DEVICE_AUTO)
+        if device_key not in (DEVICE_AUTO, DEVICE_CPU, DEVICE_GPU):
+            device_key = DEVICE_AUTO
+        self._device = device_key
+        try:
+            self._gpu_available = gpu_is_available()
+            self._gpu_info = describe_gpu()
+        except Exception:
+            self._gpu_available, self._gpu_info = False, ""
+        if self._device == DEVICE_GPU and not self._gpu_available:
+            self._device = DEVICE_AUTO
+
         self._build_ui()
         self._apply_theme(self._theme)
         self._retranslate()
@@ -1087,6 +1123,23 @@ class MainWindow(QMainWindow):
         self.diarize_check.setCursor(Qt.PointingHandCursor)
         opt_row.addWidget(self.diarize_check)
         opt_row.addStretch(1)
+
+        # Périphérique de calcul (CPU / GPU). L'entrée GPU n'est proposée que
+        # si le moteur en détecte un : inutile de promettre ce qui n'existe pas.
+        self.device_lbl = QLabel("")
+        self.device_lbl.setObjectName("subtitle")
+        self.device_combo = QComboBox()
+        self.device_combo.setObjectName("deviceCombo")
+        self.device_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.device_combo.addItem("", DEVICE_AUTO)
+        self.device_combo.addItem("", DEVICE_CPU)
+        if self._gpu_available:
+            self.device_combo.addItem("", DEVICE_GPU)
+        idx = self.device_combo.findData(self._device)
+        self.device_combo.setCurrentIndex(max(0, idx))
+        self.device_combo.currentIndexChanged.connect(self._on_device_changed)
+        opt_row.addWidget(self.device_lbl)
+        opt_row.addWidget(self.device_combo)
         root.addLayout(opt_row)
 
         # Boutons
@@ -1181,6 +1234,21 @@ class MainWindow(QMainWindow):
         self.diarize_check.setText(self.tr("diarize"))
         self.diarize_check.setToolTip(self.tr("diarize_tip"))
 
+        # Périphérique de calcul
+        self.device_lbl.setText(self.tr("device"))
+        device_labels = {
+            DEVICE_AUTO: self.tr("device_auto"),
+            DEVICE_CPU: self.tr("device_cpu"),
+            DEVICE_GPU: self.tr("device_gpu"),
+        }
+        for i in range(self.device_combo.count()):
+            key = self.device_combo.itemData(i)
+            self.device_combo.setItemText(i, device_labels.get(key, key))
+        tip = (self.tr("device_tip_gpu", info=self._gpu_info)
+               if self._gpu_available else self.tr("device_tip_none"))
+        self.device_combo.setToolTip(tip)
+        self.device_lbl.setToolTip(tip)
+
         # Enregistrement
         if not self._recording:
             self.record_btn.setText(self.tr("record"))
@@ -1222,6 +1290,24 @@ class MainWindow(QMainWindow):
         if key in THEMES:
             self._apply_theme(THEMES[key])
             self._settings.setValue("theme", key)
+
+    def _on_device_changed(self, _index: int) -> None:
+        key = self.device_combo.currentData()
+        if key in (DEVICE_AUTO, DEVICE_CPU, DEVICE_GPU):
+            self._device = key
+            self._settings.setValue("device", key)
+
+    def _worker_environment(self) -> QProcessEnvironment:
+        """Environnement transmis aux workers, incluant le choix CPU/GPU.
+
+        `resolve_backend` (transcriber_core) donne la priorité à TVFR_DEVICE ;
+        on ne l'impose donc que si l'utilisateur a fait un choix explicite,
+        afin de ne pas écraser une variable déjà définie par l'utilisateur.
+        """
+        env = QProcessEnvironment.systemEnvironment()
+        if self._device in (DEVICE_CPU, DEVICE_GPU):
+            env.insert(ENV_DEVICE, self._device)
+        return env
 
     # ---- Sélection de fichier ---------------------------------------- #
     def _browse(self) -> None:
@@ -1389,6 +1475,7 @@ class MainWindow(QMainWindow):
         proc.setProgram(program)
         proc.setArguments(arguments)
         proc.setWorkingDirectory(str(APP_ROOT))
+        proc.setProcessEnvironment(self._worker_environment())
         proc.setProcessChannelMode(QProcess.SeparateChannels)
         proc.readyReadStandardOutput.connect(self._on_live_stdout)
         proc.finished.connect(self._on_live_finished)
@@ -1474,6 +1561,7 @@ class MainWindow(QMainWindow):
         self.drop.set_enabled_visual(not active)
         self.transcribe_btn.setEnabled(not active and self._current_file is not None)
         self.quality_combo.setEnabled(not active)
+        self.device_combo.setEnabled(not active)
         self.corrections_btn.setEnabled(not active)
         self.diarize_check.setEnabled(not active)
         self.mic_combo.setEnabled(not active)
@@ -1583,6 +1671,7 @@ class MainWindow(QMainWindow):
         proc.setProgram(program)
         proc.setArguments(arguments)
         proc.setWorkingDirectory(str(APP_ROOT))
+        proc.setProcessEnvironment(self._worker_environment())
         proc.setProcessChannelMode(QProcess.SeparateChannels)
         proc.readyReadStandardOutput.connect(self._on_proc_stdout)
         proc.finished.connect(self._on_proc_finished)
@@ -1698,6 +1787,7 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setEnabled(busy)
         self.drop.set_enabled_visual(not busy)
         self.quality_combo.setEnabled(not busy)
+        self.device_combo.setEnabled(not busy)
         self.corrections_btn.setEnabled(not busy)
         self.diarize_check.setEnabled(not busy)
         self.theme_combo.setEnabled(True)  # thème toujours changeable
@@ -1766,16 +1856,19 @@ def _run_worker_mode() -> int:
     """Mode « worker » : utilisé quand l'exe figé se relance lui-même pour
     exécuter la transcription dans un processus séparé (annulable par kill)."""
     from transcribe_worker import main as worker_main
+    from transcriber_core import safe_exit
     # Retire le drapeau pour retrouver les arguments attendus par le worker.
     sys.argv = [sys.argv[0]] + sys.argv[2:]
-    return worker_main()
+    # safe_exit ne rend la main que hors GPU (cf. CTranslate2 #2038).
+    return safe_exit(worker_main())
 
 
 def _run_stream_mode() -> int:
     """Mode « streaming » : worker de transcription en direct (exe figé)."""
     from stream_worker import main as stream_main
+    from transcriber_core import safe_exit
     sys.argv = [sys.argv[0]] + sys.argv[2:]
-    return stream_main()
+    return safe_exit(stream_main())
 
 
 def main() -> int:

@@ -105,8 +105,64 @@ The app is tuned for **maximum quality**, not speed:
 | **VAD** filter (Silero)       | Strips silences → fewer hallucinations. |
 | `condition_on_previous_text`  | Keeps context between segments. |
 
-On a machine without an NVIDIA GPU, inference runs on **CPU** in `int8`
-(the sweet spot between accuracy and memory).
+By default, inference runs on **CPU** in `int8` (the sweet spot between accuracy
+and memory). This is the case for every installed copy of the app: the bundled
+CTranslate2 engine is the CPU-only build, so no GPU is used even if one is
+present.
+
+### ⚡ Optional GPU acceleration
+
+The engine behind the app (CTranslate2) can run on a GPU — **NVIDIA (CUDA)** or
+**AMD (ROCm/HIP)**. It is *opt-in* and requires installing a different engine
+build yourself; the installer stays CPU-only so it works on any machine.
+
+Once the GPU build is installed, enable it with an environment variable:
+
+```powershell
+$env:TVFR_DEVICE = "cuda"     # "auto" (default) | "cpu" | "cuda"
+$env:TVFR_COMPUTE = "float16" # optional; float16 is chosen automatically on GPU
+```
+
+`cuda` covers **both** vendors — CTranslate2 uses that single device name for
+NVIDIA and AMD alike. On GPU the app switches from `int8` to `float16`, which is
+both faster *and* more precise; `large-v3` needs roughly 4 GB of VRAM.
+
+If the GPU cannot be initialised for any reason, the app logs the cause and
+falls back to CPU instead of failing.
+
+The command-line tool exposes the same choice:
+
+```powershell
+python transcribe.py audio.mp3 --device cuda
+```
+
+<details>
+<summary>AMD Radeon setup (RDNA2+, e.g. RX 7900 XT) on Windows</summary>
+
+Requires a recent AMD Adrenalin driver and Python 3.12.
+
+```powershell
+# 1. ROCm 7.2.1 runtime
+pip install --no-cache-dir --no-deps `
+  https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_core-7.2.1-py3-none-win_amd64.whl `
+  https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_libraries_custom-7.2.1-py3-none-win_amd64.whl `
+  https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm-7.2.1.tar.gz
+
+# 2. ROCm build of CTranslate2, over the CPU/CUDA one
+#    from https://github.com/OpenNMT/CTranslate2/releases/tag/v4.7.1
+#    (asset: rocm-python-wheels-Windows.zip)
+pip install ctranslate2-4.7.1-cp312-cp312-win_amd64.whl --force-reinstall --no-deps
+
+# 3. Check the GPU is visible
+python -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())"
+```
+
+Known limitation: on RDNA3 (gfx1100) the CTranslate2 model destructor can
+deadlock ([CTranslate2#2038](https://github.com/OpenNMT/CTranslate2/issues/2038)).
+The app works around it by keeping a retired model alive, so changing model or
+compute type mid-session leaves the previous one in VRAM until restart.
+
+</details>
 
 ---
 

@@ -244,4 +244,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from transcriber_core import safe_exit
+    raise SystemExit(safe_exit(main()))

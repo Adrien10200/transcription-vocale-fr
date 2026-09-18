@@ -137,4 +137,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # safe_exit court-circuite l'arrêt de l'interpréteur quand un modèle GPU est
+    # vivant : ses destructeurs natifs se bloquent (CTranslate2 #2038).
+    from transcriber_core import safe_exit
+    raise SystemExit(safe_exit(main()))
