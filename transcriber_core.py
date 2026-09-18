@@ -335,7 +335,12 @@ def load_corrections() -> list[dict]:
             continue
         src = str(item.get("from", "")).strip()
         dst = str(item.get("to", ""))
-        if not src:
+        # « from » vide et « to » rempli = entrée de VOCABULAIRE : le mot est
+        # soufflé au décodeur (hotwords) sans qu'aucun remplacement de texte ne
+        # soit effectué. Indispensable pour les mots dont l'homophone français
+        # est un mot courant : on veut favoriser « call » sans pour autant
+        # réécrire tous les « col » du texte.
+        if not src and not dst:
             continue
         result.append({
             "from": src,
@@ -351,7 +356,10 @@ def save_corrections(corrections: list[dict]) -> None:
     clean: list[dict] = []
     for item in corrections:
         src = str(item.get("from", "")).strip()
-        if not src:
+        dst = str(item.get("to", "")).strip()
+        # Conserve les entrées de vocabulaire seul (« from » vide) : elles
+        # guident le décodeur sans déclencher de remplacement.
+        if not src and not dst:
             continue
         clean.append({
             "from": src,

@@ -118,7 +118,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "corrections_tip": "Custom word replacements (e.g. “Volio” → “Voelio”).",
         "corr_title": "Vocabulary corrections",
         "corr_intro": "When the app mishears a word, add a correction here. "
-                      "It is applied automatically to every transcription.",
+                      "It is applied automatically to every transcription.\n"
+                      "Leave “Heard” empty to only teach the word (useful for "
+                      "English terms like “call”, whose French homophone “col” "
+                      "is a real word you must not replace everywhere).",
         "corr_col_heard": "Heard (wrong)",
         "corr_col_fixed": "Replace with",
         "corr_add": "Add",
@@ -229,7 +232,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "corrections_tip": "Remplacements de mots personnalisés (ex. « Volio » → « Voelio »).",
         "corr_title": "Corrections de vocabulaire",
         "corr_intro": "Quand l'application comprend mal un mot, ajoutez une correction ici. "
-                      "Elle est appliquée automatiquement à chaque transcription.",
+                      "Elle est appliquée automatiquement à chaque transcription.\n"
+                      "Laissez « Compris » vide pour seulement apprendre le mot "
+                      "(utile pour les termes anglais comme « call », dont "
+                      "l'homophone « col » est un vrai mot français qu'il ne "
+                      "faut pas remplacer partout).",
         "corr_col_heard": "Compris (erroné)",
         "corr_col_fixed": "Remplacer par",
         "corr_add": "Ajouter",
@@ -691,8 +698,10 @@ class CorrectionsDialog(QDialog):
     def _update_count(self) -> None:
         n = 0
         for r in range(self.table.rowCount()):
-            item = self.table.item(r, 0)
-            if item and item.text().strip():
+            src = self.table.item(r, 0)
+            dst = self.table.item(r, 1)
+            filled = (src and src.text().strip()) or (dst and dst.text().strip())
+            if filled:
                 n += 1
         self.count_lbl.setText(self._tr("corr_count", n=n))
 
@@ -703,7 +712,9 @@ class CorrectionsDialog(QDialog):
             dst_item = self.table.item(r, 1)
             src = src_item.text().strip() if src_item else ""
             dst = dst_item.text() if dst_item else ""
-            if src:
+            # Ligne avec seulement la colonne de droite = mot de vocabulaire :
+            # soufflé au décodeur, sans remplacement de texte.
+            if src or dst.strip():
                 out.append({
                     "from": src, "to": dst,
                     "whole_word": True, "case_sensitive": False,
